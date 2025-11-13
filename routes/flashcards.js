@@ -5,46 +5,112 @@ const auth = require("../middlewares/auth");
 const FlashcardSet = require("../models/FlashcardSet");
 require("dotenv").config();
 
-// === GEMINI SETUP ===
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const PDFParser = require("pdf2json");
 
-if (!process.env.GEMINI_API_KEY) {
-  console.error("GEMINI_API_KEY is missing in .env");
+/* --------------------------------------------------------------
+   1. Load API keys from .env (comma-separated)
+   -------------------------------------------------------------- */
+const GEMINI_API_KEYS = process.env.GEMINI_API_KEYS
+  ? process.env.GEMINI_API_KEYS.split(",")
+      .map(k => k.trim())
+      .filter(Boolean)
+  : [];
+
+if (GEMINI_API_KEYS.length === 0) {
+  console.error("GEMINI_API_KEYS is missing or empty in .env");
   process.exit(1);
 }
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+/* --------------------------------------------------------------
+   2. Model names
+   -------------------------------------------------------------- */
+const PRIMARY_MODEL = "gemini-1.5-flash";
+const FALLBACK_MODEL = "gemini-pro";
 
-// === MODEL CONFIGURATION ===
-const MODEL_NAME = "gemini-2.5-flash"; 
-const FALLBACK_MODEL_NAME = "gemini-pro";
+/* --------------------------------------------------------------
+   3. AI Manager – key rotation + model caching
+   -------------------------------------------------------------- */
+class AIManager {
+  constructor(keys) {
+    this.keys = keys;
+    this.currentIdx = 0;
+    this.models = new Map();
+    this.initCurrentModel();
+  }
 
-let geminiModel;
+  initCurrentModel() {
+    const key = this.keys[this.currentIdx];
+    try {
+      const genAI = new GoogleGenerativeAI(key);
+      const model = genAI.getGenerativeModel({ model: PRIMARY_MODEL });
+      this.models.set(this.currentIdx, model);
+      console.log(`ISI AI → key #${this.currentIdx + 1} (primary ${PRIMARY_MODEL})`);
+    } catch (e) {
+      console.warn(`Primary model failed for key #${this.currentIdx + 1}, trying fallback...`);
+      this.tryFallback();
+    }
+  }
 
-try {
-  geminiModel = genAI.getGenerativeModel({ model: MODEL_NAME });
-  console.log(`Using primary model: ${MODEL_NAME}`);
-} catch (error) {
-  console.error(`Error setting up primary model ${MODEL_NAME}:`, error.message);
-  try {
-    geminiModel = genAI.getGenerativeModel({ model: FALLBACK_MODEL_NAME });
-    console.log(`Using fallback model: ${FALLBACK_MODEL_NAME}`);
-  } catch (fallbackError) {
-    console.error(`Error setting up fallback model ${FALLBACK_MODEL_NAME}:`, fallbackError.message);
-    throw new Error("Failed to initialize any working Gemini model.");
+  tryFallback() {
+    const key = this.keys[this.currentIdx];
+    try {
+      const genAI = new GoogleGenerativeAI(key);
+      const model = genAI.getGenerativeModel({ model: FALLBACK_MODEL });
+      this.models.set(this.currentIdx, model);
+      console.log(`ISI AI → key #${this.currentIdx + 1} (fallback ${FALLBACK_MODEL})`);
+    } catch (e) {
+      console.error(`All models failed for key #${this.currentIdx + 1}`);
+      this.models.set(this.currentIdx, null);
+    }
+  }
+
+  getCurrentModel() {
+    return this.models.get(this.currentIdx) ?? null;
+  }
+
+  async rotateIfNeeded(error) {
+    const isRateLimit =
+      error.status === 429 ||
+      /quota/i.test(error.message) ||
+      /RATE_LIMIT/i.test(error.message) ||
+      /429/i.test(error.message);
+
+    if (!isRateLimit || this.keys.length === 1) return null;
+
+    console.warn(`ISI AI rate-limit on key #${this.currentIdx + 1}. Rotating...`);
+    this.currentIdx = (this.currentIdx + 1) % this.keys.length;
+    this.initCurrentModel();
+
+    const newModel = this.getCurrentModel();
+    if (!newModel) throw new Error("All API keys exhausted.");
+    return newModel;
   }
 }
 
-// === PDF PARSING - Use pdf2json ===
-const PDFParser = require("pdf2json");
+/* --------------------------------------------------------------
+   4. Initialise AI manager
+   -------------------------------------------------------------- */
+let aiManager;
+try {
+  aiManager = new AIManager(GEMINI_API_KEYS);
+} catch (e) {
+  console.error("Failed to initialise ISI AI:", e.message);
+  process.exit(1);
+}
 
-// === HELPER: Sleep for retry ===
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/* --------------------------------------------------------------
+   5. Helper
+   -------------------------------------------------------------- */
+const sleep = ms => new Promise(res => setTimeout(res, ms));
 
-/* ---------- GENERATE FROM PDF (MEMORY STORAGE) ---------- */
+/* ==============================================================
+   ROUTE: Generate Flashcards from PDF
+   ============================================================== */
 router.post("/generate-flashcards", auth, async (req, res) => {
-  if (!geminiModel) {
-    return res.status(500).json({ error: "AI model not initialized." });
+  const currentModel = aiManager.getCurrentModel();
+  if (!currentModel) {
+    return res.status(500).json({ error: "ISI AI model not initialized." });
   }
 
   try {
@@ -62,10 +128,9 @@ router.post("/generate-flashcards", auth, async (req, res) => {
     let pdfText = "";
     try {
       const pdfParser = new PDFParser();
-      
       const pdfData = await new Promise((resolve, reject) => {
-        pdfParser.on("pdfParser_dataError", (err) => reject(err));
-        pdfParser.on("pdfParser_dataReady", (data) => resolve(data));
+        pdfParser.on("pdfParser_dataError", reject);
+        pdfParser.on("pdfParser_dataReady", resolve);
         pdfParser.parseBuffer(pdfFile.data);
       });
 
@@ -87,50 +152,59 @@ router.post("/generate-flashcards", auth, async (req, res) => {
       });
     }
 
-    // === Generate Flashcards with Gemini ===
-    const prompt = `Generate 10 flashcards from the following content for subject "${subject}".\n\nEach flashcard must have:\n- question (string)\n- answer (string)\n\nReturn ONLY a valid JSON array. No explanations. Example:\n[{"question":"Capital of France?","answer":"Paris"}]\n\nContent:\n${pdfText.substring(0, 30000)}`;
+    // === Generate Flashcards with ISI AI ===
+    const content = pdfText.substring(0, 30_000);
+    const prompt = `Generate 10 flashcards from the following content for subject "${subject}".\n\n` +
+      `Each flashcard must have:\n- question (string)\n- answer (string)\n\n` +
+      `Return ONLY a valid JSON array. No explanations.\n` +
+      `Example:\n[{"question":"Capital of France?","answer":"Paris"}]\n\n` +
+      `Content:\n${content}`;
 
     let rawResponse;
     let attempts = 0;
-    const maxAttempts = 3;
+    const maxAttempts = 5;
+    let model = currentModel;
 
-    while (attempts < maxAttempts) {
+    while (attempts < maxAttempts && model) {
       try {
-        const result = await geminiModel.generateContent(prompt);
-        
+        const result = await model.generateContent(prompt);
         rawResponse = result.response.text();
-        break; // Success, exit loop
-      } catch (geminiErr) {
+        break;
+      } catch (err) {
         attempts++;
-        
-        // Identify transient errors: Rate Limit (429/quota) or Service Unavailable (503)
-        const isTransientError = (
-          geminiErr.message?.includes("quota") || 
-          geminiErr.status === 429 ||
-          geminiErr.status === 503
-        );
+        console.warn(`ISI AI attempt ${attempts} failed:`, err.message.slice(0, 120));
 
-        if (isTransientError && attempts < maxAttempts) {
-          console.warn(`Gemini transient error (${geminiErr.status || 'rate limit'}). Retrying in ${attempts * 2}s...`);
-          await sleep(attempts * 2000); // Exponential backoff
+        const rotated = await aiManager.rotateIfNeeded(err);
+        if (rotated) {
+          model = rotated;
+          attempts = 0;
+          await sleep(1000);
+          continue;
+        }
+
+        const transient = [429, 500, 503].includes(err.status) ||
+          /quota|timeout/i.test(err.message);
+
+        if (transient && attempts < maxAttempts) {
+          const delay = Math.pow(2, attempts) * 1000;
+          console.warn(`ISI AI transient error – retry in ${delay / 1000}s`);
+          await sleep(delay);
         } else {
-          // Permanently fail for non-transient errors (like 400, 404) or after max retries
-          console.error("Gemini API error:", geminiErr);
-          return res.status(500).json({
-            error: "Gemini API error: " + geminiErr.message,
-          });
+          break;
         }
       }
     }
 
     if (!rawResponse) {
-      return res.status(500).json({ error: "Failed to generate flashcards after retries." });
+      return res.status(500).json({
+        error: "ISI AI failed to generate flashcards after retries and key rotations.",
+        suggestion: "Try again later or use a smaller PDF."
+      });
     }
 
     // === Parse JSON Response ===
     let cards;
     try {
-      // Clean up markdown fences (```json) often included by the model
       const cleaned = rawResponse
         .replace(/^```json\s*/i, "")
         .replace(/```$/g, "")
@@ -141,18 +215,17 @@ router.post("/generate-flashcards", auth, async (req, res) => {
       if (!Array.isArray(cards) || cards.length === 0)
         throw new Error("Empty or invalid cards");
 
-      // Validate each card structure
       cards.forEach((c, i) => {
-        if (!c.question || typeof c.question !== "string")
-          throw new Error(`Card ${i}: missing question`);
-        if (!c.answer || typeof c.answer !== "string")
-          throw new Error(`Card ${i}: missing answer`);
+        if (typeof c.question !== "string" || !c.question.trim())
+          throw new Error(`Card ${i}: missing/invalid question`);
+        if (typeof c.answer !== "string" || !c.answer.trim())
+          throw new Error(`Card ${i}: missing/invalid answer`);
       });
     } catch (parseError) {
-      console.warn("Invalid JSON from Gemini:", rawResponse);
+      console.warn("ISI AI returned invalid JSON:", rawResponse.slice(0, 500));
       return res.status(500).json({
-        error: "AI returned invalid flashcard format. Raw Response Debug: " + rawResponse.substring(0, 500),
-        debug: rawResponse.substring(0, 500),
+        error: "ISI AI returned invalid flashcard format.",
+        debug: rawResponse.slice(0, 500)
       });
     }
 
@@ -161,81 +234,76 @@ router.post("/generate-flashcards", auth, async (req, res) => {
       userId: req.user.userId,
       title,
       subject,
-      cards: cards.map((c) => ({
-        question: c.question,
-        answer: c.answer,
+      cards: cards.map(c => ({
+        question: c.question.trim(),
+        answer: c.answer.trim(),
         masteryLevel: 0,
       })),
     });
 
     await flashcardSet.save();
 
-    return res.json({ 
+    return res.json({
       success: true,
       id: flashcardSet._id,
-      message: "Flashcards generated successfully" 
+      message: "Flashcards generated successfully"
     });
   } catch (error) {
     console.error("Error generating flashcards:", error);
-    return res.status(500).json({ 
-      error: "Internal server error: " + error.message 
+    return res.status(500).json({
+      error: "Internal server error: " + error.message
     });
   }
 });
 
-/* ---------- MANUAL CREATION ---------- */
+/* ==============================================================
+   OTHER ROUTES (unchanged, just cleaned up)
+   ============================================================== */
+
+/* Manual creation */
 router.post("/create-flashcards-manual", auth, async (req, res) => {
   try {
     const { title, subject, cards } = req.body;
-    
-    if (!title || !subject || !Array.isArray(cards)) {
-      return res.status(400).json({ error: "Title, subject, and cards array are required" });
+
+    if (!title || !subject || !Array.isArray(cards) || cards.length === 0) {
+      return res.status(400).json({ error: "Title, subject, and non-empty cards array are required" });
     }
-    
-    if (cards.length === 0) {
-      return res.status(400).json({ error: "At least one flashcard is required" });
-    }
-    
-    if (cards.some((c) => !c.question?.trim() || !c.answer?.trim())) {
-      return res.status(400).json({ error: "All cards must have both question and answer" });
+
+    if (cards.some(c => !c.question?.trim() || !c.answer?.trim())) {
+      return res.status(400).json({ error: "All cards must have non-empty question and answer" });
     }
 
     const set = new FlashcardSet({
       userId: req.user.userId,
       title,
       subject,
-      cards: cards.map((c) => ({
+      cards: cards.map(c => ({
         question: c.question.trim(),
         answer: c.answer.trim(),
         masteryLevel: 0,
       })),
     });
-    
+
     await set.save();
-    
-    res.json({ 
-      success: true,
-      id: set._id,
-      message: "Flashcards created successfully" 
-    });
+
+    res.json({ success: true, id: set._id, message: "Flashcards created successfully" });
   } catch (err) {
     console.error("Error creating manual flashcards:", err);
     res.status(500).json({ error: "Failed to save flashcards" });
   }
 });
 
-/* ---------- LIST SETS ---------- */
+/* List sets */
 router.get("/sets", auth, async (req, res) => {
   try {
     const sets = await FlashcardSet.find({ userId: req.user.userId })
       .sort({ createdAt: -1 })
       .lean();
 
-    const formatted = sets.map((s) => {
-      const known = s.cards.filter((c) => c.masteryLevel >= 80).length;
+    const formatted = sets.map(s => {
+      const known = s.cards.filter(c => c.masteryLevel >= 80).length;
       const total = s.cards.length;
       let status = "not-started";
-      
       if (s.lastStudied) {
         status = known === total ? "completed" : "in-progress";
       }
@@ -254,94 +322,60 @@ router.get("/sets", auth, async (req, res) => {
       };
     });
 
-    res.json({
-      success: true,
-      sets: formatted
-    });
+    res.json({ success: true, sets: formatted });
   } catch (err) {
     console.error("Error fetching flashcard sets:", err);
     res.status(500).json({ error: "Failed to fetch flashcard sets" });
   }
 });
 
-/* ---------- GET ONE SET ---------- */
+/* Get one set */
 router.get("/sets/:id", auth, async (req, res) => {
   try {
-    const set = await FlashcardSet.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
-    
-    if (!set) {
-      return res.status(404).json({ error: "Flashcard set not found" });
-    }
-    
-    res.json({
-      success: true,
-      set: set
-    });
+    const set = await FlashcardSet.findOne({ _id: req.params.id, userId: req.user.userId });
+    if (!set) return res.status(404).json({ error: "Flashcard set not found" });
+    res.json({ success: true, set });
   } catch (err) {
     console.error("Error fetching flashcard set:", err);
     res.status(500).json({ error: "Server error while fetching flashcard set" });
   }
 });
 
-/* ---------- DELETE SET ---------- */
+/* Delete set */
 router.delete("/sets/:id", auth, async (req, res) => {
   try {
-    const set = await FlashcardSet.findOneAndDelete({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
-    
-    if (!set) {
-      return res.status(404).json({ error: "Flashcard set not found" });
-    }
-    
-    res.json({ 
-      success: true,
-      message: "Flashcard set deleted successfully" 
-    });
+    const set = await FlashcardSet.findOneAndDelete({ _id: req.params.id, userId: req.user.userId });
+    if (!set) return res.status(404).json({ error: "Flashcard set not found" });
+    res.json({ success: true, message: "Flashcard set deleted successfully" });
   } catch (err) {
     console.error("Error deleting flashcard set:", err);
     res.status(500).json({ error: "Failed to delete flashcard set" });
   }
 });
 
-/* ---------- STUDY PROGRESS ---------- */
+/* Study progress */
 router.post("/sets/:id/study", auth, async (req, res) => {
   try {
     const { cardId, known } = req.body;
-    
-    if (typeof known !== 'boolean') {
-      return res.status(400).json({ error: "Known field is required and must be boolean" });
+    if (typeof known !== "boolean") {
+      return res.status(400).json({ error: "known field must be boolean" });
     }
 
-    const set = await FlashcardSet.findOne({
-      _id: req.params.id,
-      userId: req.user.userId,
-    });
-    
-    if (!set) {
-      return res.status(404).json({ error: "Flashcard set not found" });
-    }
+    const set = await FlashcardSet.findOne({ _id: req.params.id, userId: req.user.userId });
+    if (!set) return res.status(404).json({ error: "Flashcard set not found" });
 
     const card = set.cards.id(cardId);
-    if (!card) {
-      return res.status(404).json({ error: "Card not found in this set" });
-    }
+    if (!card) return res.status(404).json({ error: "Card not found in this set" });
 
-    // Update mastery level
     card.masteryLevel = Math.min(100, Math.max(0, card.masteryLevel + (known ? 15 : -10)));
     set.lastStudied = new Date();
-    
-    // Calculate overall mastery level for the set
+
     const totalMastery = set.cards.reduce((sum, c) => sum + c.masteryLevel, 0);
     set.masteryLevel = Math.round(totalMastery / set.cards.length);
 
     await set.save();
-    
-    res.json({ 
+
+    res.json({
       success: true,
       message: "Study progress updated",
       masteryLevel: card.masteryLevel,
