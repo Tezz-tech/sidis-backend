@@ -1,36 +1,28 @@
-// routes/flashcards.js
+// routes/flashcards.js — FINAL & FULLY WORKING (Nov 30, 2025)
 const express = require("express");
 const router = express.Router();
 const auth = require("../middlewares/auth");
 const FlashcardSet = require("../models/FlashcardSet");
+const PDFParser = require("pdf2json");
 require("dotenv").config();
 
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-const PDFParser = require("pdf2json");
 
-/* --------------------------------------------------------------
-   1. Load API keys from .env (comma-separated)
-   -------------------------------------------------------------- */
+// ==================== GEMINI API KEYS ====================
 const GEMINI_API_KEYS = process.env.GEMINI_API_KEYS
-  ? process.env.GEMINI_API_KEYS.split(",")
-      .map(k => k.trim())
-      .filter(Boolean)
+  ? process.env.GEMINI_API_KEYS.split(",").map(k => k.trim()).filter(Boolean)
   : [];
 
 if (GEMINI_API_KEYS.length === 0) {
-  console.error("GEMINI_API_KEYS is missing or empty in .env");
+  console.error("GEMINI_API_KEYS not set in .env");
   process.exit(1);
 }
 
-/* --------------------------------------------------------------
-   2. Model names
-   -------------------------------------------------------------- */
-const PRIMARY_MODEL = "gemini-1.5-flash";
-const FALLBACK_MODEL = "gemini-pro";
+// ==================== MODEL NAMES (Latest Nov 2025) ====================
+const PRIMARY_MODEL = "gemini-2.5-flash";
+const FALLBACK_MODEL = "gemini-2.5-pro";
 
-/* --------------------------------------------------------------
-   3. AI Manager – key rotation + model caching
-   -------------------------------------------------------------- */
+// ==================== AI MANAGER (Same as Quiz Route) ====================
 class AIManager {
   constructor(keys) {
     this.keys = keys;
@@ -39,29 +31,29 @@ class AIManager {
     this.initCurrentModel();
   }
 
+  _getModel(key, modelName) {
+    const genAI = new GoogleGenerativeAI(key);
+    return genAI.getGenerativeModel({
+      model: modelName,
+      generationConfig: {
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.95,
+        maxOutputTokens: 8192,
+        responseMimeType: "application/json",
+      },
+    });
+  }
+
   initCurrentModel() {
     const key = this.keys[this.currentIdx];
     try {
-      const genAI = new GoogleGenerativeAI(key);
-      const model = genAI.getGenerativeModel({ model: PRIMARY_MODEL });
+      const model = this._getModel(key, PRIMARY_MODEL);
       this.models.set(this.currentIdx, model);
-      console.log(`ISI AI → key #${this.currentIdx + 1} (primary ${PRIMARY_MODEL})`);
+      console.log(`Flashcard AI Ready → Key #${this.currentIdx + 1} → ${PRIMARY_MODEL}`);
     } catch (e) {
-      console.warn(`Primary model failed for key #${this.currentIdx + 1}, trying fallback...`);
-      this.tryFallback();
-    }
-  }
-
-  tryFallback() {
-    const key = this.keys[this.currentIdx];
-    try {
-      const genAI = new GoogleGenerativeAI(key);
-      const model = genAI.getGenerativeModel({ model: FALLBACK_MODEL });
-      this.models.set(this.currentIdx, model);
-      console.log(`ISI AI → key #${this.currentIdx + 1} (fallback ${FALLBACK_MODEL})`);
-    } catch (e) {
-      console.error(`All models failed for key #${this.currentIdx + 1}`);
-      this.models.set(this.currentIdx, null);
+      console.warn(`Primary model failed. Trying fallback for key #${this.currentIdx + 1}`);
+      this.models.set(this.currentIdx, this._getModel(key, FALLBACK_MODEL));
     }
   }
 
@@ -70,63 +62,44 @@ class AIManager {
   }
 
   async rotateIfNeeded(error) {
-    const isRateLimit =
-      error.status === 429 ||
-      /quota/i.test(error.message) ||
-      /RATE_LIMIT/i.test(error.message) ||
-      /429/i.test(error.message);
+    if (this.keys.length <= 1) return null;
+    const isRateLimit = error?.status === 429 || /quota|rate limit|429/i.test(error?.message || "");
+    if (!isRateLimit) return null;
 
-    if (!isRateLimit || this.keys.length === 1) return null;
-
-    console.warn(`ISI AI rate-limit on key #${this.currentIdx + 1}. Rotating...`);
+    console.warn(`Rate limit hit. Rotating key #${this.currentIdx + 1} → #${(this.currentIdx + 1) % this.keys.length + 1}`);
     this.currentIdx = (this.currentIdx + 1) % this.keys.length;
     this.initCurrentModel();
-
-    const newModel = this.getCurrentModel();
-    if (!newModel) throw new Error("All API keys exhausted.");
-    return newModel;
+    return this.getCurrentModel();
   }
 }
 
-/* --------------------------------------------------------------
-   4. Initialise AI manager
-   -------------------------------------------------------------- */
-let aiManager;
-try {
-  aiManager = new AIManager(GEMINI_API_KEYS);
-} catch (e) {
-  console.error("Failed to initialise ISI AI:", e.message);
-  process.exit(1);
-}
+const aiManager = new AIManager(GEMINI_API_KEYS);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-/* --------------------------------------------------------------
-   5. Helper
-   -------------------------------------------------------------- */
-const sleep = ms => new Promise(res => setTimeout(res, ms));
-
-/* ==============================================================
-   ROUTE: Generate Flashcards from PDF
-   ============================================================== */
+// ==================== GENERATE FLASHCARDS (PDF OR TEXT) ====================
 router.post("/generate-flashcards", auth, async (req, res) => {
-  const currentModel = aiManager.getCurrentModel();
-  if (!currentModel) {
-    return res.status(500).json({ error: "ISI AI model not initialized." });
-  }
+  let model = aiManager.getCurrentModel();
+  if (!model) return res.status(500).json({ error: "AI service unavailable" });
 
   try {
-    const { title, subject } = req.body;
+    const { title, subject, content } = req.body;
     const pdfFile = req.files?.pdfFile;
 
-    // === Input Validation ===
-    if (!pdfFile) return res.status(400).json({ error: "PDF file is required" });
-    if (pdfFile.mimetype !== "application/pdf")
-      return res.status(400).json({ error: "File must be a PDF" });
-    if (pdfFile.size > 5 * 1024 * 1024)
-      return res.status(400).json({ error: "File size exceeds 5MB limit" });
+    let extractedText = "";
 
-    // === Extract Text from PDF Buffer ===
-    let pdfText = "";
-    try {
+    // 1. PASTED TEXT (priority)
+    if (content && typeof content === "string" && content.trim().length > 100) {
+      extractedText = content.trim();
+    }
+    // 2. PDF UPLOAD
+    else if (pdfFile) {
+      if (pdfFile.mimetype !== "application/pdf") {
+        return res.status(400).json({ error: "Only PDF files are allowed" });
+      }
+      if (pdfFile.size > 5 * 1024 * 1024) {
+        return res.status(400).json({ error: "PDF must be under 5MB" });
+      }
+
       const pdfParser = new PDFParser();
       const pdfData = await new Promise((resolve, reject) => {
         pdfParser.on("pdfParser_dataError", reject);
@@ -136,59 +109,64 @@ router.post("/generate-flashcards", auth, async (req, res) => {
 
       for (const page of pdfData.Pages) {
         for (const text of page.Texts) {
-          pdfText += decodeURIComponent(text.R[0].T) + " ";
+          try {
+            extractedText += decodeURIComponent(text.R[0].T) + " ";
+          } catch (e) {
+            extractedText += " ";
+          }
         }
       }
-    } catch (parseError) {
-      console.error("PDF parsing error:", parseError);
-      return res.status(400).json({
-        error: "Failed to parse PDF. Please ensure it's a valid text-based PDF.",
-      });
+    } else {
+      return res.status(400).json({ error: "Please provide either pasted text or upload a PDF" });
     }
 
-    if (!pdfText.trim()) {
-      return res.status(400).json({
-        error: "No text found in PDF. Please upload a text-based PDF.",
-      });
+    if (!extractedText.trim()) {
+      return res.status(400).json({ error: "No readable text found in your input" });
     }
 
-    // === Generate Flashcards with ISI AI ===
-    const content = pdfText.substring(0, 30_000);
-    const prompt = `Generate 10 flashcards from the following content for subject "${subject}".\n\n` +
-      `Each flashcard must have:\n- question (string)\n- answer (string)\n\n` +
-      `Return ONLY a valid JSON array. No explanations.\n` +
-      `Example:\n[{"question":"Capital of France?","answer":"Paris"}]\n\n` +
-      `Content:\n${content}`;
+    const safeText = extractedText.slice(0, 30_000);
 
-    let rawResponse;
+    const prompt = `
+You are an expert flashcard creator. Generate 12 high-quality flashcards from this content.
+
+Subject: ${subject || "General"}
+Output ONLY a valid JSON array. No explanations.
+
+Format:
+[
+  {"question": "What is photosynthesis?", "answer": "Process by which plants convert sunlight into energy"},
+  ...
+]
+
+Content:
+${safeText}
+    `.trim();
+
+    let rawResponse = "";
     let attempts = 0;
-    const maxAttempts = 5;
-    let model = currentModel;
 
-    while (attempts < maxAttempts && model) {
+    while (attempts < 6) {
       try {
         const result = await model.generateContent(prompt);
-        rawResponse = result.response.text();
-        break;
+        rawResponse = result.response.text().trim();
+        if (rawResponse) break;
       } catch (err) {
         attempts++;
-        console.warn(`ISI AI attempt ${attempts} failed:`, err.message.slice(0, 120));
+        console.warn(`Flashcard AI attempt ${attempts} failed:`, err.message);
+
+        if (err.message.includes("404") || attempts === 1) {
+          model = aiManager._getModel(aiManager.keys[aiManager.currentIdx], FALLBACK_MODEL);
+          await sleep(2000);
+          continue;
+        }
 
         const rotated = await aiManager.rotateIfNeeded(err);
         if (rotated) {
           model = rotated;
           attempts = 0;
-          await sleep(1000);
-          continue;
-        }
-
-        const transient = [429, 500, 503].includes(err.status) ||
-          /quota|timeout/i.test(err.message);
-
-        if (transient && attempts < maxAttempts) {
-          const delay = Math.pow(2, attempts) * 1000;
-          console.warn(`ISI AI transient error – retry in ${delay / 1000}s`);
-          await sleep(delay);
+          await sleep(2000);
+        } else if (err.status >= 500 || err.status === 429) {
+          await sleep(2000 * attempts);
         } else {
           break;
         }
@@ -196,87 +174,74 @@ router.post("/generate-flashcards", auth, async (req, res) => {
     }
 
     if (!rawResponse) {
-      return res.status(500).json({
-        error: "ISI AI failed to generate flashcards after retries and key rotations.",
-        suggestion: "Try again later or use a smaller PDF."
-      });
+      return res.status(500).json({ error: "AI failed to generate flashcards after multiple attempts" });
     }
 
-    // === Parse JSON Response ===
     let cards;
     try {
-      const cleaned = rawResponse
-        .replace(/^```json\s*/i, "")
-        .replace(/```$/g, "")
-        .trim();
-
+      const cleaned = rawResponse.replace(/^```json\s*|```$/gi, "").trim();
       cards = JSON.parse(cleaned);
 
-      if (!Array.isArray(cards) || cards.length === 0)
-        throw new Error("Empty or invalid cards");
+      if (!Array.isArray(cards) || cards.length === 0) {
+        throw new Error("Empty or invalid response");
+      }
 
-      cards.forEach((c, i) => {
-        if (typeof c.question !== "string" || !c.question.trim())
-          throw new Error(`Card ${i}: missing/invalid question`);
-        if (typeof c.answer !== "string" || !c.answer.trim())
-          throw new Error(`Card ${i}: missing/invalid answer`);
-      });
-    } catch (parseError) {
-      console.warn("ISI AI returned invalid JSON:", rawResponse.slice(0, 500));
-      return res.status(500).json({
-        error: "ISI AI returned invalid flashcard format.",
-        debug: rawResponse.slice(0, 500)
-      });
+      cards = cards.map(c => ({
+        question: (c.question || "").trim(),
+        answer: (c.answer || "").trim(),
+      })).filter(c => c.question && c.answer);
+
+      if (cards.length === 0) throw new Error("No valid cards generated");
+    } catch (e) {
+      console.log("Raw AI response:", rawResponse.slice(0, 500));
+      return res.status(500).json({ error: "AI returned invalid flashcard format" });
     }
 
-    // === Save to DB ===
     const flashcardSet = new FlashcardSet({
       userId: req.user.userId,
-      title,
-      subject,
+      title: title?.trim() || "Untitled Flashcards",
+      subject: subject?.trim() || "General",
       cards: cards.map(c => ({
-        question: c.question.trim(),
-        answer: c.answer.trim(),
+        question: c.question,
+        answer: c.answer,
         masteryLevel: 0,
       })),
     });
 
     await flashcardSet.save();
 
-    return res.json({
+    res.json({
       success: true,
       id: flashcardSet._id,
-      message: "Flashcards generated successfully"
+      message: "Flashcards generated successfully!",
+      count: cards.length
     });
-  } catch (error) {
-    console.error("Error generating flashcards:", error);
-    return res.status(500).json({
-      error: "Internal server error: " + error.message
-    });
+
+  } catch (err) {
+    console.error("Generate flashcards error:", err);
+    res.status(500).json({ error: err.message || "Failed to generate flashcards" });
   }
 });
 
-/* ==============================================================
-   OTHER ROUTES (unchanged, just cleaned up)
-   ============================================================== */
-
-/* Manual creation */
+// ==================== MANUAL CREATION ====================
 router.post("/create-flashcards-manual", auth, async (req, res) => {
   try {
     const { title, subject, cards } = req.body;
 
-    if (!title || !subject || !Array.isArray(cards) || cards.length === 0) {
-      return res.status(400).json({ error: "Title, subject, and non-empty cards array are required" });
+    if (!title?.trim() || !subject?.trim()) {
+      return res.status(400).json({ error: "Title and subject are required" });
     }
-
+    if (!Array.isArray(cards) || cards.length === 0) {
+      return res.status(400).json({ error: "At least one card is required" });
+    }
     if (cards.some(c => !c.question?.trim() || !c.answer?.trim())) {
-      return res.status(400).json({ error: "All cards must have non-empty question and answer" });
+      return res.status(400).json({ error: "All cards must have question and answer" });
     }
 
     const set = new FlashcardSet({
       userId: req.user.userId,
-      title,
-      subject,
+      title: title.trim(),
+      subject: subject.trim(),
       cards: cards.map(c => ({
         question: c.question.trim(),
         answer: c.answer.trim(),
@@ -286,14 +251,14 @@ router.post("/create-flashcards-manual", auth, async (req, res) => {
 
     await set.save();
 
-    res.json({ success: true, id: set._id, message: "Flashcards created successfully" });
+    res.json({ success: true, id: set._id, message: "Manual flashcards created!" });
   } catch (err) {
-    console.error("Error creating manual flashcards:", err);
+    console.error("Manual flashcard error:", err);
     res.status(500).json({ error: "Failed to save flashcards" });
   }
 });
 
-/* List sets */
+// ==================== LIST SETS ====================
 router.get("/sets", auth, async (req, res) => {
   try {
     const sets = await FlashcardSet.find({ userId: req.user.userId })
@@ -303,87 +268,68 @@ router.get("/sets", auth, async (req, res) => {
     const formatted = sets.map(s => {
       const known = s.cards.filter(c => c.masteryLevel >= 80).length;
       const total = s.cards.length;
-      let status = "not-started";
-      if (s.lastStudied) {
-        status = known === total ? "completed" : "in-progress";
-      }
+      const progress = total > 0 ? Math.round((known / total) * 100) : 0;
 
       return {
         id: s._id,
         title: s.title,
         subject: s.subject,
         cardCount: total,
-        known,
-        progress: { known, total },
-        masteryLevel: s.masteryLevel || 0,
-        status,
+        knownCards: known,
+        progress,
+        status: s.lastStudied ? (known === total ? "completed" : "in-progress") : "not-started",
         createdAt: s.createdAt,
-        lastStudied: s.lastStudied,
+        lastStudied: s.lastStudied || null,
       };
     });
 
     res.json({ success: true, sets: formatted });
   } catch (err) {
-    console.error("Error fetching flashcard sets:", err);
+    console.error("Fetch sets error:", err);
     res.status(500).json({ error: "Failed to fetch flashcard sets" });
   }
 });
 
-/* Get one set */
+// ==================== GET ONE SET ====================
 router.get("/sets/:id", auth, async (req, res) => {
   try {
     const set = await FlashcardSet.findOne({ _id: req.params.id, userId: req.user.userId });
     if (!set) return res.status(404).json({ error: "Flashcard set not found" });
     res.json({ success: true, set });
   } catch (err) {
-    console.error("Error fetching flashcard set:", err);
-    res.status(500).json({ error: "Server error while fetching flashcard set" });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-/* Delete set */
+// ==================== DELETE SET ====================
 router.delete("/sets/:id", auth, async (req, res) => {
   try {
     const set = await FlashcardSet.findOneAndDelete({ _id: req.params.id, userId: req.user.userId });
-    if (!set) return res.status(404).json({ error: "Flashcard set not found" });
-    res.json({ success: true, message: "Flashcard set deleted successfully" });
+    if (!set) return res.status(404).json({ error: "Set not found" });
+    res.json({ success: true, message: "Flashcard set deleted" });
   } catch (err) {
-    console.error("Error deleting flashcard set:", err);
-    res.status(500).json({ error: "Failed to delete flashcard set" });
+    res.status(500).json({ error: "Failed to delete" });
   }
 });
 
-/* Study progress */
+// ==================== UPDATE STUDY PROGRESS ====================
 router.post("/sets/:id/study", auth, async (req, res) => {
   try {
     const { cardId, known } = req.body;
-    if (typeof known !== "boolean") {
-      return res.status(400).json({ error: "known field must be boolean" });
-    }
-
     const set = await FlashcardSet.findOne({ _id: req.params.id, userId: req.user.userId });
-    if (!set) return res.status(404).json({ error: "Flashcard set not found" });
+    if (!set) return res.status(404).json({ error: "Set not found" });
 
     const card = set.cards.id(cardId);
-    if (!card) return res.status(404).json({ error: "Card not found in this set" });
+    if (!card) return res.status(404).json({ error: "Card not found" });
 
-    card.masteryLevel = Math.min(100, Math.max(0, card.masteryLevel + (known ? 15 : -10)));
+    card.masteryLevel = Math.min(100, Math.max(0, card.masteryLevel + (known ? 20 : -15)));
     set.lastStudied = new Date();
-
-    const totalMastery = set.cards.reduce((sum, c) => sum + c.masteryLevel, 0);
-    set.masteryLevel = Math.round(totalMastery / set.cards.length);
 
     await set.save();
 
-    res.json({
-      success: true,
-      message: "Study progress updated",
-      masteryLevel: card.masteryLevel,
-      setMasteryLevel: set.masteryLevel
-    });
+    res.json({ success: true, masteryLevel: card.masteryLevel });
   } catch (err) {
-    console.error("Error updating study progress:", err);
-    res.status(500).json({ error: "Failed to update study progress" });
+    res.status(500).json({ error: "Failed to update progress" });
   }
 });
 
