@@ -61,7 +61,7 @@ app.use(
 app.use('/api/auth', authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/quizzes', quizRoutes);
-app.use('api/admin', admin);
+app.use('/api/admin', admin);
 app.use('/api/flashcards', flashcardRoutes);
 
 // -------------------------------------------------
