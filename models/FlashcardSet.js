@@ -15,6 +15,7 @@ const FlashcardSetSchema = new mongoose.Schema({
   masteryLevel: { type: Number, default: 0 },
   lastStudied:  { type: Date },
   createdAt:    { type: Date, default: Date.now },
+  isAdminCreated: { type: Boolean, default: false },
 });
 
 module.exports = mongoose.model('FlashcardSet', FlashcardSetSchema);
