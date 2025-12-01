@@ -323,16 +323,16 @@ router.get("/:id", auth, async (req, res) => {
   }
 });
 
-/* Save quiz result */
+/* Save quiz result (allow taking any quiz) */
 router.post("/quiz-results", auth, async (req, res) => {
   try {
     const { quizId, score, answers, timeSpent } = req.body;
     
-    // Check if quiz exists
-    const quiz = await Quiz.findOne({ _id: quizId, userId: req.user.userId });
+    // Allow taking any quiz — only ensure quiz exists
+    const quiz = await Quiz.findById(quizId);
     if (!quiz) return res.status(404).json({ error: "Quiz not found" });
 
-    // Save result
+    // Save result for current user
     const result = new QuizResult({
       userId: req.user.userId,
       quizId,
@@ -342,6 +342,20 @@ router.post("/quiz-results", auth, async (req, res) => {
     });
     await result.save();
 
+    // Optionally log activity (ActivityLog model available)
+    try {
+      const ActivityLog = require("../models/ActivityLog");
+      await ActivityLog.create({
+        userId: req.user.userId,
+        action: "quiz_taken",
+        entityType: "quiz",
+        entityId: quiz._id,
+        details: { score, timeSpent }
+      });
+    } catch (e) {
+      // ignore logging errors
+    }
+
     res.json({ success: true, message: "Quiz result saved successfully" });
   } catch (e) {
     console.error("Save result error:", e);
@@ -349,35 +363,70 @@ router.post("/quiz-results", auth, async (req, res) => {
   }
 });
 
-/* Get result by quiz id */
-router.get("/quiz-results/:quizId", auth, async (req, res) => {
+/* ============================================================== */
+/* PUBLIC ROUTES: allow any authenticated user to browse/take any */
+/* ============================================================== */
+
+/* List all quizzes (public) */
+router.get("/public/sets", auth, async (req, res) => {
   try {
-    const result = await QuizResult.findOne({
-      quizId: req.params.quizId,
-      userId: req.user.userId
-    });
-    if (!result) return res.status(404).json({ error: "Result not found" });
-    res.json({ success: true, result });
+    const page = parseInt(req.query.page) || 1;
+    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const skip = (page - 1) * limit;
+
+    const quizzes = await Quiz.find()
+      .populate("userId", "fullName email")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const total = await Quiz.countDocuments();
+
+    const formatted = quizzes.map(q => ({
+      id: q._id,
+      title: q.title,
+      subject: q.subject,
+      difficulty: q.difficulty,
+      creator: q.userId?.fullName || null,
+      creatorId: q.userId?._id || null,
+      numQuestions: q.numQuestions,
+      timeLimit: q.timeLimit,
+      createdAt: q.createdAt,
+    }));
+
+    res.json({ success: true, quizzes: formatted, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
   } catch (e) {
-    console.error("Fetch result error:", e);
-    res.status(500).json({ error: "Server error" });
+    console.error("Fetch public quizzes error:", e);
+    res.status(500).json({ error: "Failed to fetch public quizzes" });
   }
 });
 
-/* Delete quiz + its results */
-router.delete("/sets/:id", auth, async (req, res) => {
+/* Get a public quiz by id (do NOT include correct answers) */
+router.get("/public/:id", auth, async (req, res) => {
   try {
-    const quiz = await Quiz.findOneAndDelete({
-      _id: req.params.id,
-      userId: req.user.userId
-    });
+    const quiz = await Quiz.findById(req.params.id).populate("userId", "fullName email").lean();
     if (!quiz) return res.status(404).json({ error: "Quiz not found" });
 
-    await QuizResult.deleteMany({ quizId: req.params.id });
-    res.json({ success: true, message: "Quiz deleted successfully" });
+    const publicQuiz = {
+      id: quiz._id,
+      title: quiz.title,
+      subject: quiz.subject,
+      difficulty: quiz.difficulty,
+      creator: quiz.userId?.fullName || null,
+      creatorId: quiz.userId?._id || null,
+      timeLimit: quiz.timeLimit,
+      numQuestions: quiz.numQuestions,
+      questions: quiz.questions.map(q => ({
+        question: q.question,
+        options: q.options
+      }))
+    };
+
+    res.json({ success: true, quiz: publicQuiz });
   } catch (e) {
-    console.error("Delete quiz error:", e);
-    res.status(500).json({ error: "Error deleting quiz" });
+    console.error("Fetch public quiz error:", e);
+    res.status(500).json({ error: "Error fetching quiz" });
   }
 });
 
