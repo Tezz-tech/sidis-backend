@@ -430,4 +430,22 @@ router.get("/public/:id", auth, async (req, res) => {
   }
 });
 
+// ==================== Get result by quiz id (for current user) ====================
+router.get("/quiz-results/:quizId", auth, async (req, res) => {
+  try {
+    const result = await QuizResult.findOne({
+      quizId: req.params.quizId,
+      userId: req.user.userId
+    });
+
+    // Return success with null when user hasn't taken the quiz yet
+    if (!result) return res.json({ success: true, result: null });
+
+    res.json({ success: true, result });
+  } catch (e) {
+    console.error("Fetch result error:", e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 module.exports = router;
