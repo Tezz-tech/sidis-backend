@@ -407,63 +407,91 @@ router.post("/public/create", async (req, res) => {
 
 router.get("/public/sets", auth, async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
 
-    const quizzes = await Quiz.find({ isPublic: true })
-      .populate("userId", "fullName email")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean();
+    const [quizzes, total] = await Promise.all([
+      Quiz.find({ isPublic: true })
+        .select("title subject difficulty numQuestions timeLimit createdAt authorName")
+        .populate("userId", "fullName") // Only get creator name
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
 
-    const total = await Quiz.countDocuments({ isPublic: true });
+      Quiz.countDocuments({ isPublic: true })
+    ]);
 
     const formatted = quizzes.map(q => ({
       id: q._id,
       title: q.title,
       subject: q.subject,
       difficulty: q.difficulty,
-      creator: q.userId?.fullName || q.authorName || "Anonymous",
-      creatorId: q.userId?._id || null,
       numQuestions: q.numQuestions,
       timeLimit: q.timeLimit,
+      creator: q.userId?.fullName || q.authorName || "Anonymous",
       createdAt: q.createdAt,
     }));
 
-    res.json({ success: true, quizzes: formatted, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+    res.json({
+      success: true,
+      quizzes: formatted,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
   } catch (e) {
     console.error("Fetch public quizzes error:", e);
     res.status(500).json({ error: "Failed to fetch public quizzes" });
   }
 });
 
-/* Get a public quiz by id (do NOT include correct answers) */
+/* ============================================================== */
+/* PUBLIC: Get ANY public quiz by ID (hides correct answers)      */
+/* ============================================================== */
 router.get("/public/:id", auth, async (req, res) => {
   try {
-    const quiz = await Quiz.findOne({ _id: req.params.id, isPublic: true }).populate("userId", "fullName email").lean();
-    if (!quiz) return res.status(404).json({ error: "Quiz not found or not public" });
+    const quiz = await Quiz.findOne({
+      _id: req.params.id,
+      isPublic: true  // This line is CRITICAL — blocks private quizzes
+    })
+    .populate("userId", "fullName")
+    .lean();
 
-    const publicQuiz = {
-      id: quiz._id,
-      title: quiz.title,
-      subject: quiz.subject,
-      difficulty: quiz.difficulty,
-      creator: quiz.userId?.fullName || quiz.authorName || "Anonymous",
-      creatorId: quiz.userId?._id || null,
-      timeLimit: quiz.timeLimit,
-      numQuestions: quiz.numQuestions,
-      questions: quiz.questions.map(q => ({
-        question: q.question,
-        options: q.options
-      }))
-    };
+    if (!quiz) {
+      return res.status(404).json({
+        success: false,
+        error: "Quiz not found or not public"
+      });
+    }
 
-    res.json({ success: true, quiz: publicQuiz });
+    // NEVER send correctAnswer to frontend
+    const safeQuestions = quiz.questions.map(q => ({
+      question: q.question,
+      options: q.options
+    }));
+
+    res.json({
+      success: true,
+      quiz: {
+        id: quiz._id,
+        title: quiz.title,
+        subject: quiz.subject,
+        difficulty: quiz.difficulty,
+        timeLimit: quiz.timeLimit,
+        numQuestions: quiz.numQuestions,
+        creator: quiz.userId?.fullName || quiz.authorName || "Anonymous",
+        createdAt: quiz.createdAt,
+        questions: safeQuestions
+      }
+    });
   } catch (e) {
     console.error("Fetch public quiz error:", e);
-    res.status(500).json({ error: "Error fetching quiz" });
+    res.status(500).json({ error: "Server error" });
   }
 });
 

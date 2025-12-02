@@ -371,42 +371,67 @@ router.post("/public/create", async (req, res) => {
 /* List all flashcard sets (public) */
 router.get("/public/sets", auth, async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
 
-    const sets = await FlashcardSet.find({ isPublic: true })
-      .populate("userId", "fullName email")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean();
+    const [sets, total] = await Promise.all([
+      FlashcardSet.find({ isPublic: true })
+        .select("title subject cards createdAt lastStudied authorName")
+        .populate("userId", "fullName")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
 
-    const total = await FlashcardSet.countDocuments({ isPublic: true });
+      FlashcardSet.countDocuments({ isPublic: true })
+    ]);
 
     const formatted = sets.map(s => ({
       id: s._id,
       title: s.title,
       subject: s.subject,
       creator: s.userId?.fullName || s.authorName || "Anonymous",
-      creatorId: s.userId?._id || null,
       cardCount: s.cards.length,
       createdAt: s.createdAt,
       lastStudied: s.lastStudied,
     }));
 
-    res.json({ success: true, sets: formatted, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+    res.json({
+      success: true,
+      sets: formatted,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
   } catch (err) {
     console.error("Fetch public flashcard sets error:", err);
-    res.status(500).json({ error: "Failed to fetch flashcard sets" });
+    res.status(500).json({ error: "Failed to fetch public flashcard sets" });
   }
 });
 
-/* Get a public flashcard set by id (full Q/A allowed) */
+/* ============================================================== */
+/* PUBLIC: Get any public flashcard set by ID (full cards OK)     */
+/* Flashcards don't have "correct answers" → safe to show all     */
+/* ============================================================== */
 router.get("/public/sets/:id", auth, async (req, res) => {
   try {
-    const set = await FlashcardSet.findOne({ _id: req.params.id, isPublic: true }).populate("userId", "fullName email").lean();
-    if (!set) return res.status(404).json({ error: "Flashcard set not found or not public" });
+    const set = await FlashcardSet.findOne({
+      _id: req.params.id,
+      isPublic: true
+    })
+    .populate("userId", "fullName")
+    .lean();
+
+    if (!set) {
+      return res.status(404).json({
+        success: false,
+        error: "Flashcard set not found or not public"
+      });
+    }
 
     res.json({
       success: true,
@@ -415,67 +440,66 @@ router.get("/public/sets/:id", auth, async (req, res) => {
         title: set.title,
         subject: set.subject,
         creator: set.userId?.fullName || set.authorName || "Anonymous",
-        creatorId: set.userId?._id || null,
         cards: set.cards,
         createdAt: set.createdAt,
         lastStudied: set.lastStudied,
       }
     });
   } catch (err) {
-    console.error("Fetch public flashcard error:", err);
+    console.error("Fetch public flashcard set error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-/* Record study progress for a public set (per-user) */
+/* Record study progress for a public set */
 router.post("/public/sets/:id/study", auth, async (req, res) => {
   try {
     const { cardId, known } = req.body;
     const setId = req.params.id;
-    const set = await FlashcardSet.findById(setId).lean();
-    if (!set) return res.status(404).json({ error: "Set not found" });
 
-    // Validate card exists in set
+    const set = await FlashcardSet.findOne({ _id: setId, isPublic: true }).lean();
+    if (!set) return res.status(404).json({ error: "Public set not found" });
+
     const card = set.cards.find(c => c._id.toString() === cardId);
-    if (!card) return res.status(404).json({ error: "Card not found in set" });
+    if (!card) return res.status(404).json({ error: "Card not found" });
 
-    // Upsert progress per user + set + card
     const delta = known ? 20 : -15;
-    const progress = await FlashcardProgress.findOne({ userId: req.user.userId, setId, cardId });
 
-    if (progress) {
-      progress.masteryLevel = Math.min(100, Math.max(0, progress.masteryLevel + delta));
-      progress.lastStudied = new Date();
-      await progress.save();
-    } else {
-      await FlashcardProgress.create({
-        userId: req.user.userId,
-        setId,
-        cardId,
-        masteryLevel: Math.min(100, Math.max(0, (known ? 20 : 0))),
-        lastStudied: new Date()
-      });
-    }
+    const progress = await FlashcardProgress.findOneAndUpdate(
+      { userId: req.user.userId, setId, cardId },
+      {
+        $setOnInsert: { masteryLevel: 0 },
+        $inc: { masteryLevel: delta },
+        $set: { lastStudied: new Date() }
+      },
+      { upsert: true, new: true }
+    );
 
-    // Return current mastery for the card
-    const current = await FlashcardProgress.findOne({ userId: req.user.userId, setId, cardId }).lean();
+    progress.masteryLevel = Math.min(100, Math.max(0, progress.masteryLevel));
+    await progress.save();
 
-    res.json({ success: true, masteryLevel: current.masteryLevel });
+    res.json({ success: true, masteryLevel: progress.masteryLevel });
   } catch (err) {
-    console.error("Public study error:", err);
+    console.error("Study progress error:", err);
     res.status(500).json({ error: "Failed to record progress" });
   }
 });
 
-/* Get user's progress for a public set */
+/* Get user's personal progress on a public set */
 router.get("/public/sets/:id/progress", auth, async (req, res) => {
   try {
-    const setId = req.params.id;
-    const progress = await FlashcardProgress.find({ userId: req.user.userId, setId }).lean();
+    const progress = await FlashcardProgress.find({
+      userId: req.user.userId,
+      setId: req.params.id
+    }).lean();
 
-    // Map cardId -> masteryLevel
     const map = {};
-    progress.forEach(p => map[p.cardId] = { masteryLevel: p.masteryLevel, lastStudied: p.lastStudied });
+    progress.forEach(p => {
+      map[p.cardId] = {
+        masteryLevel: p.masteryLevel,
+        lastStudied: p.lastStudied
+      };
+    });
 
     res.json({ success: true, progress: map });
   } catch (err) {
