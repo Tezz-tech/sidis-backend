@@ -4,7 +4,7 @@ const connectDB = require('./config/db');
 const authRoutes = require('./routes/auth');
 const dashboardRoutes = require('./routes/dashboard');
 const quizRoutes = require('./routes/quizzes');
-const admin = require('./routes/admin');
+const adminRoutes = require('./routes/admin');
 const flashcardRoutes = require('./routes/flashcards');
 const fileUpload = require('express-fileupload');
 const cors = require('cors');
@@ -61,7 +61,18 @@ app.use(
 app.use('/api/auth', authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/quizzes', quizRoutes);
-app.use('/api/admin', admin);
+
+// Resolve possible export shapes (router, { default: router }, or module with .router)
+let adminRouter = adminRoutes;
+if (adminRouter && adminRouter.default) adminRouter = adminRouter.default;
+if (adminRouter && adminRouter.router) adminRouter = adminRouter.router;
+
+if (!adminRouter || (typeof adminRouter !== 'function' && typeof adminRouter !== 'object')) {
+  console.error('Admin routes did not export a valid router — skipping mount of /api/admin');
+} else {
+  app.use('/api/admin', adminRouter);
+}
+
 app.use('/api/flashcards', flashcardRoutes);
 
 // -------------------------------------------------

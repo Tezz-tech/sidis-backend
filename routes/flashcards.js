@@ -337,6 +337,37 @@ const FlashcardProgress = require("../models/FlashcardProgress"); // <-- new mod
 
 // ==================== PUBLIC FLASHCARD ROUTES ====================
 
+/* ============================================================== */
+/* PUBLIC: create flashcard set without JWT (optional authorName)*/
+/* This route does NOT use auth middleware intentionally.         */
+/* ============================================================== */
+router.post("/public/create", async (req, res) => {
+  try {
+    const { title, subject, cards, authorName } = req.body;
+    if (!title || !subject || !Array.isArray(cards) || cards.length === 0) {
+      return res.status(400).json({ error: "Missing required fields: title, subject, cards" });
+    }
+    const validCards = cards.filter(c => c.question && c.answer);
+    if (validCards.length === 0) return res.status(400).json({ error: "No valid cards provided" });
+
+    const set = new FlashcardSet({
+      userId: null,
+      authorName: authorName?.trim() || null,
+      title: title.trim(),
+      subject: subject.trim(),
+      cards: validCards.map(c => ({ question: c.question.trim(), answer: c.answer.trim(), masteryLevel: 0 })),
+      isPublic: true,
+    });
+
+    await set.save();
+
+    res.status(201).json({ success: true, id: set._id, message: "Public flashcard set created" });
+  } catch (err) {
+    console.error("Public create flashcards error:", err);
+    res.status(500).json({ error: "Failed to create public flashcard set" });
+  }
+});
+
 /* List all flashcard sets (public) */
 router.get("/public/sets", auth, async (req, res) => {
   try {
@@ -344,20 +375,20 @@ router.get("/public/sets", auth, async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 20, 100);
     const skip = (page - 1) * limit;
 
-    const sets = await FlashcardSet.find()
+    const sets = await FlashcardSet.find({ isPublic: true })
       .populate("userId", "fullName email")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean();
 
-    const total = await FlashcardSet.countDocuments();
+    const total = await FlashcardSet.countDocuments({ isPublic: true });
 
     const formatted = sets.map(s => ({
       id: s._id,
       title: s.title,
       subject: s.subject,
-      creator: s.userId?.fullName || null,
+      creator: s.userId?.fullName || s.authorName || "Anonymous",
       creatorId: s.userId?._id || null,
       cardCount: s.cards.length,
       createdAt: s.createdAt,
@@ -374,8 +405,8 @@ router.get("/public/sets", auth, async (req, res) => {
 /* Get a public flashcard set by id (full Q/A allowed) */
 router.get("/public/sets/:id", auth, async (req, res) => {
   try {
-    const set = await FlashcardSet.findById(req.params.id).populate("userId", "fullName email").lean();
-    if (!set) return res.status(404).json({ error: "Flashcard set not found" });
+    const set = await FlashcardSet.findOne({ _id: req.params.id, isPublic: true }).populate("userId", "fullName email").lean();
+    if (!set) return res.status(404).json({ error: "Flashcard set not found or not public" });
 
     res.json({
       success: true,
@@ -383,7 +414,7 @@ router.get("/public/sets/:id", auth, async (req, res) => {
         id: set._id,
         title: set.title,
         subject: set.subject,
-        creator: set.userId?.fullName || null,
+        creator: set.userId?.fullName || set.authorName || "Anonymous",
         creatorId: set.userId?._id || null,
         cards: set.cards,
         createdAt: set.createdAt,

@@ -1,7 +1,8 @@
 const mongoose = require('mongoose');
 
 const quizSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // no longer required for public submissions
+  authorName: { type: String, default: null },
   title: { type: String, required: true },
   subject: { type: String, required: true },
   difficulty: { type: String, default: 'medium' },
@@ -13,6 +14,7 @@ const quizSchema = new mongoose.Schema({
     correctAnswer: Number,
   }],
   isAdminCreated: { type: Boolean, default: false },
+  isPublic: { type: Boolean, default: false },
   status: { type: String, default: 'not-started' },
   createdAt: { type: Date, default: Date.now },
 });

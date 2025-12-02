@@ -364,31 +364,68 @@ router.post("/quiz-results", auth, async (req, res) => {
 });
 
 /* ============================================================== */
+/* PUBLIC: create a quiz without JWT (optional authorName).       */
+/* This route does NOT use auth middleware intentionally.         */
+/* ============================================================== */
+router.post("/public/create", async (req, res) => {
+  try {
+    const { title, subject, questions, difficulty = "medium", timeLimit = 30, authorName } = req.body;
+
+    if (!title || !subject || !Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).json({ error: "Missing required fields: title, subject, questions" });
+    }
+
+    // basic validation for questions shape
+    const validQuestions = questions.filter(q => q.question && Array.isArray(q.options) && q.options.length === 4 && (q.correctAnswer !== undefined));
+    if (validQuestions.length === 0) return res.status(400).json({ error: "Questions are invalid or empty" });
+
+    const quiz = new Quiz({
+      userId: null, // anonymous/public
+      authorName: authorName?.trim() || null,
+      title: title.trim(),
+      subject: subject.trim(),
+      difficulty,
+      timeLimit: parseInt(timeLimit, 10),
+      numQuestions: validQuestions.length,
+      questions: validQuestions,
+      isPublic: true,
+    });
+
+    await quiz.save();
+
+    res.status(201).json({ success: true, id: quiz._id, message: "Public quiz created" });
+  } catch (err) {
+    console.error("Public create quiz error:", err);
+    res.status(500).json({ error: "Failed to create public quiz" });
+  }
+});
+
+/* ============================================================== */
 /* PUBLIC ROUTES: allow any authenticated user to browse/take any */
+/* Now public listing returns only quizzes flagged as public     */
 /* ============================================================== */
 
-/* List all quizzes (public) */
 router.get("/public/sets", auth, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = Math.min(parseInt(req.query.limit) || 20, 100);
     const skip = (page - 1) * limit;
 
-    const quizzes = await Quiz.find()
+    const quizzes = await Quiz.find({ isPublic: true })
       .populate("userId", "fullName email")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean();
 
-    const total = await Quiz.countDocuments();
+    const total = await Quiz.countDocuments({ isPublic: true });
 
     const formatted = quizzes.map(q => ({
       id: q._id,
       title: q.title,
       subject: q.subject,
       difficulty: q.difficulty,
-      creator: q.userId?.fullName || null,
+      creator: q.userId?.fullName || q.authorName || "Anonymous",
       creatorId: q.userId?._id || null,
       numQuestions: q.numQuestions,
       timeLimit: q.timeLimit,
@@ -405,15 +442,15 @@ router.get("/public/sets", auth, async (req, res) => {
 /* Get a public quiz by id (do NOT include correct answers) */
 router.get("/public/:id", auth, async (req, res) => {
   try {
-    const quiz = await Quiz.findById(req.params.id).populate("userId", "fullName email").lean();
-    if (!quiz) return res.status(404).json({ error: "Quiz not found" });
+    const quiz = await Quiz.findOne({ _id: req.params.id, isPublic: true }).populate("userId", "fullName email").lean();
+    if (!quiz) return res.status(404).json({ error: "Quiz not found or not public" });
 
     const publicQuiz = {
       id: quiz._id,
       title: quiz.title,
       subject: quiz.subject,
       difficulty: quiz.difficulty,
-      creator: quiz.userId?.fullName || null,
+      creator: quiz.userId?.fullName || quiz.authorName || "Anonymous",
       creatorId: quiz.userId?._id || null,
       timeLimit: quiz.timeLimit,
       numQuestions: quiz.numQuestions,

@@ -1,11 +1,73 @@
 const express = require("express");
 const router = express.Router();
 const auth = require("../middlewares/auth");
+const adminAuth = require("../middlewares/adminAuth");
 const User = require("../models/User");
 const Quiz = require("../models/Quiz");
 const QuizResult = require("../models/QuizResult");
 const FlashcardSet = require("../models/FlashcardSet");
 const ActivityLog = require("../models/ActivityLog");
+
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+require("dotenv").config();
+
+const GEMINI_API_KEYS = process.env.GEMINI_API_KEYS
+  ? process.env.GEMINI_API_KEYS.split(",").map(k => k.trim()).filter(Boolean)
+  : [];
+
+const PRIMARY_MODEL = "gemini-2.5-flash";
+const FALLBACK_MODEL = "gemini-2.5-pro";
+
+// Enforce admin on all admin routes
+router.use(auth, adminAuth);
+
+// --- Lightweight AI helper (tries keys sequentially, fallback model on 1st key failure) ---
+async function generateWithGemini(prompt) {
+  if (!GEMINI_API_KEYS.length) {
+    throw new Error("No Gemini API keys configured");
+  }
+
+  for (let i = 0; i < GEMINI_API_KEYS.length; i++) {
+    const key = GEMINI_API_KEYS[i];
+    try {
+      const genAI = new GoogleGenerativeAI(key);
+      let model;
+      try {
+        model = genAI.getGenerativeModel({
+          model: PRIMARY_MODEL,
+          generationConfig: {
+            temperature: 0.7,
+            topK: 40,
+            topP: 0.95,
+            maxOutputTokens: 8192,
+            responseMimeType: "application/json",
+          },
+        });
+      } catch (e) {
+        // try fallback for this key
+        model = genAI.getGenerativeModel({
+          model: FALLBACK_MODEL,
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 8192,
+            responseMimeType: "application/json",
+          },
+        });
+      }
+
+      const result = await model.generateContent(prompt);
+      const raw = result?.response?.text?.().trim?.() ?? result?.response ?? "";
+      if (!raw) throw new Error("Empty response from AI");
+      return raw;
+    } catch (err) {
+      // Try next key
+      console.warn(`Gemini key #${i + 1} failed: ${err.message}`);
+      continue;
+    }
+  }
+
+  throw new Error("All Gemini keys failed");
+}
 
 // ==================== USERS MANAGEMENT ====================
 
@@ -525,4 +587,152 @@ router.get("/activity-logs", auth, async (req, res) => {
   }
 });
 
-module.exports = router;
+// ----------------- ADMIN AI: Generate Quiz -----------------
+router.post("/quizzes/generate", async (req, res) => {
+  try {
+    const { title, subject = "General", numQuestions = 10, difficulty = "medium", timeLimit = 30, content, assignToUserId } = req.body;
+
+    if (!content || typeof content !== "string" || content.trim().length < 50) {
+      return res.status(400).json({ error: "Please provide 'content' (pasted text) of sufficient length" });
+    }
+
+    const safeContent = content.trim().slice(0, 60_000);
+    const prompt = `
+You are an expert teacher. Generate ${numQuestions} multiple-choice questions based strictly on the content below.
+Subject: ${subject}
+Difficulty: ${difficulty}
+
+Output ONLY a valid JSON array with this shape:
+[
+  { "question": "Question text?", "options": ["A","B","C","D"], "correctAnswer": 0 }
+]
+
+Content:
+${safeContent}
+    `.trim();
+
+    let raw;
+    try {
+      raw = await generateWithGemini(prompt);
+    } catch (e) {
+      console.error("AI generation failed:", e);
+      return res.status(500).json({ error: "AI generation failed" });
+    }
+
+    let questions;
+    try {
+      questions = JSON.parse(raw);
+      if (!Array.isArray(questions) || questions.length === 0) throw new Error("Invalid format");
+      // Basic validation/normalize
+      questions = questions.map(q => ({
+        question: q.question,
+        options: Array.isArray(q.options) ? q.options.slice(0,4) : [],
+        correctAnswer: Number(q.correctAnswer)
+      })).filter(q => q.question && q.options && q.options.length === 4);
+      if (questions.length === 0) throw new Error("No valid questions");
+    } catch (e) {
+      console.error("Parse AI quiz error:", e);
+      return res.status(500).json({ error: "Failed to parse AI output" });
+    }
+
+    const quiz = new Quiz({
+      userId: assignToUserId || req.user.userId,
+      authorName: req.user.fullName || null,
+      title: title?.trim() || "Untitled Quiz (AI)",
+      subject,
+      difficulty,
+      timeLimit: parseInt(timeLimit, 10),
+      numQuestions: questions.length,
+      questions,
+      isAdminCreated: true,
+      isPublic: true
+    });
+
+    await quiz.save();
+
+    await ActivityLog.create({
+      userId: req.user.userId,
+      action: "admin_ai_generated_quiz",
+      entityType: "quiz",
+      entityId: quiz._id,
+      details: { title: quiz.title, subject }
+    });
+
+    res.status(201).json({ success: true, id: quiz._id, message: "AI generated quiz created" });
+  } catch (err) {
+    console.error("Admin generate quiz error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ----------------- ADMIN AI: Generate Flashcards -----------------
+router.post("/flashcards/generate", async (req, res) => {
+  try {
+    const { title, subject = "General", content, assignToUserId } = req.body;
+
+    if (!content || typeof content !== "string" || content.trim().length < 50) {
+      return res.status(400).json({ error: "Please provide 'content' (pasted text) of sufficient length" });
+    }
+
+    const safeContent = content.trim().slice(0, 30_000);
+    const prompt = `
+You are an expert flashcard creator. Generate 12 high-quality flashcards from the content below.
+Subject: ${subject}
+Output ONLY a valid JSON array of {"question": "...", "answer": "..."}.
+
+Content:
+${safeContent}
+    `.trim();
+
+    let raw;
+    try {
+      raw = await generateWithGemini(prompt);
+    } catch (e) {
+      console.error("AI generation failed:", e);
+      return res.status(500).json({ error: "AI generation failed" });
+    }
+
+    let cards;
+    try {
+      const cleaned = typeof raw === "string" ? raw.replace(/^```json\s*|```$/gi, "").trim() : raw;
+      cards = JSON.parse(cleaned);
+      if (!Array.isArray(cards) || cards.length === 0) throw new Error("Invalid format");
+      cards = cards.map(c => ({ question: (c.question || "").trim(), answer: (c.answer || "").trim() }))
+                   .filter(c => c.question && c.answer);
+      if (cards.length === 0) throw new Error("No valid cards");
+    } catch (e) {
+      console.error("Parse AI flashcards error:", e);
+      return res.status(500).json({ error: "Failed to parse AI output" });
+    }
+
+    const set = new FlashcardSet({
+      userId: assignToUserId || req.user.userId,
+      authorName: req.user.fullName || null,
+      title: title?.trim() || "Untitled Flashcards (AI)",
+      subject,
+      cards: cards.map(c => ({ question: c.question, answer: c.answer, masteryLevel: 0 })),
+      isAdminCreated: true,
+      isPublic: true
+    });
+
+    await set.save();
+
+    await ActivityLog.create({
+      userId: req.user.userId,
+      action: "admin_ai_generated_flashcards",
+      entityType: "flashcard",
+      entityId: set._id,
+      details: { title: set.title, subject }
+    });
+
+    res.status(201).json({ success: true, id: set._id, message: "AI generated flashcard set created", count: cards.length });
+  } catch (err) {
+    console.error("Admin generate flashcards error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Ensure we export an Express router (compatible with require('./routes/admin'))
+module.exports = typeof module.exports === 'object' && module.exports !== null && module.exports.router
+  ? module.exports.router
+  : (module.exports = router);
