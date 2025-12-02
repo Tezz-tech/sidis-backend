@@ -1,7 +1,5 @@
 const express = require("express");
 const router = express.Router();
-const auth = require("../middlewares/auth");
-const adminAuth = require("../middlewares/adminAuth");
 const User = require("../models/User");
 const Quiz = require("../models/Quiz");
 const QuizResult = require("../models/QuizResult");
@@ -18,8 +16,7 @@ const GEMINI_API_KEYS = process.env.GEMINI_API_KEYS
 const PRIMARY_MODEL = "gemini-2.5-flash";
 const FALLBACK_MODEL = "gemini-2.5-pro";
 
-// Enforce admin on all admin routes
-router.use(auth, adminAuth);
+
 
 // --- Lightweight AI helper (tries keys sequentially, fallback model on 1st key failure) ---
 async function generateWithGemini(prompt) {
@@ -72,7 +69,7 @@ async function generateWithGemini(prompt) {
 // ==================== USERS MANAGEMENT ====================
 
 /* Get all users with stats */
-router.get("/users", auth, async (req, res) => {
+router.get("/users",  async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -134,7 +131,7 @@ router.get("/users", auth, async (req, res) => {
 });
 
 /* Get single user details with full history */
-router.get("/users/:userId", auth, async (req, res) => {
+router.get("/users/:userId",  async (req, res) => {
   try {
     const user = await User.findById(req.params.userId).select("-password");
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -168,7 +165,7 @@ router.get("/users/:userId", auth, async (req, res) => {
 });
 
 /* Get user activity logs */
-router.get("/users/:userId/activity", auth, async (req, res) => {
+router.get("/users/:userId/activity",  async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
@@ -193,7 +190,7 @@ router.get("/users/:userId/activity", auth, async (req, res) => {
 });
 
 /* Toggle user active status */
-router.patch("/users/:userId/toggle-active", auth, async (req, res) => {
+router.patch("/users/:userId/toggle-active",  async (req, res) => {
   try {
     const user = await User.findById(req.params.userId);
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -216,7 +213,7 @@ router.patch("/users/:userId/toggle-active", auth, async (req, res) => {
 });
 
 /* Make user admin */
-router.patch("/users/:userId/make-admin", auth, async (req, res) => {
+router.patch("/users/:userId/make-admin",  async (req, res) => {
   try {
     const user = await User.findById(req.params.userId);
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -240,7 +237,7 @@ router.patch("/users/:userId/make-admin", auth, async (req, res) => {
 // ==================== QUIZ MANAGEMENT ====================
 
 /* Get all quizzes (admin view) */
-router.get("/quizzes", auth, async (req, res) => {
+router.get("/quizzes",  async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -293,7 +290,7 @@ router.get("/quizzes", auth, async (req, res) => {
 });
 
 /* Create quiz as admin (for specific user or global) */
-router.post("/quizzes", auth, async (req, res) => {
+router.post("/quizzes",  async (req, res) => {
   try {
     const { title, subject, difficulty, timeLimit, questions, assignToUserId } = req.body;
 
@@ -329,7 +326,7 @@ router.post("/quizzes", auth, async (req, res) => {
 });
 
 /* Update quiz (admin only) */
-router.patch("/quizzes/:quizId", auth, async (req, res) => {
+router.patch("/quizzes/:quizId",  async (req, res) => {
   try {
     const { title, subject, difficulty, timeLimit, questions } = req.body;
 
@@ -361,7 +358,7 @@ router.patch("/quizzes/:quizId", auth, async (req, res) => {
 });
 
 /* Delete quiz (admin only) */
-router.delete("/quizzes/:quizId", auth, async (req, res) => {
+router.delete("/quizzes/:quizId",  async (req, res) => {
   try {
     const quiz = await Quiz.findByIdAndDelete(req.params.quizId);
     if (!quiz) return res.status(404).json({ error: "Quiz not found" });
@@ -385,7 +382,7 @@ router.delete("/quizzes/:quizId", auth, async (req, res) => {
 // ==================== FLASHCARD MANAGEMENT ====================
 
 /* Get all flashcard sets (admin view) */
-router.get("/flashcards", auth, async (req, res) => {
+router.get("/flashcards",  async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -422,7 +419,7 @@ router.get("/flashcards", auth, async (req, res) => {
 });
 
 /* Create flashcard set as admin */
-router.post("/flashcards", auth, async (req, res) => {
+router.post("/flashcards",  async (req, res) => {
   try {
     const { title, subject, cards, assignToUserId } = req.body;
 
@@ -459,7 +456,7 @@ router.post("/flashcards", auth, async (req, res) => {
 });
 
 /* Update flashcard set (admin only) */
-router.patch("/flashcards/:setId", auth, async (req, res) => {
+router.patch("/flashcards/:setId",  async (req, res) => {
   try {
     const { title, subject, cards } = req.body;
 
@@ -492,7 +489,7 @@ router.patch("/flashcards/:setId", auth, async (req, res) => {
 });
 
 /* Delete flashcard set (admin only) */
-router.delete("/flashcards/:setId", auth, async (req, res) => {
+router.delete("/flashcards/:setId",  async (req, res) => {
   try {
     const set = await FlashcardSet.findByIdAndDelete(req.params.setId);
     if (!set) return res.status(404).json({ error: "Flashcard set not found" });
@@ -514,7 +511,7 @@ router.delete("/flashcards/:setId", auth, async (req, res) => {
 // ==================== ANALYTICS & INSIGHTS ====================
 
 /* Dashboard summary stats */
-router.get("/dashboard/stats", auth, async (req, res) => {
+router.get("/dashboard/stats",  async (req, res) => {
   try {
     const totalUsers = await User.countDocuments();
     const totalQuizzes = await Quiz.countDocuments();
@@ -562,7 +559,7 @@ router.get("/dashboard/stats", auth, async (req, res) => {
 });
 
 /* Get all activity logs */
-router.get("/activity-logs", auth, async (req, res) => {
+router.get("/activity-logs",  async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
