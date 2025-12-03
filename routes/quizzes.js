@@ -412,7 +412,7 @@ router.get("/public/sets", auth, async (req, res) => {
     const skip = (page - 1) * limit;
 
     const [quizzes, total] = await Promise.all([
-      Quiz.find({ isPublic: true })
+      Quiz.find({ isPublic: false })
         .select("title subject difficulty numQuestions timeLimit createdAt authorName")
         .populate("userId", "fullName") // Only get creator name
         .sort({ createdAt: -1 })
@@ -457,7 +457,7 @@ router.get("/public/:id", auth, async (req, res) => {
   try {
     const quiz = await Quiz.findOne({
       _id: req.params.id,
-      isPublic: true  // This line is CRITICAL — blocks private quizzes
+      isPublic: false  // This line is CRITICAL — blocks private quizzes
     })
     .populate("userId", "fullName")
     .lean();
