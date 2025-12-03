@@ -458,7 +458,6 @@ router.get("/public/sets", async (req, res) => {  // Removed: auth,
 /* ============================================================== */
 /* PUBLIC: Get ANY public quiz by ID (hides correct answers)      */
 /* ============================================================== */
-
 router.get("/public/:id", async (req, res) => {  // Removed: auth,
   try {
     // Removed isPublic: false filter to allow all quizzes
