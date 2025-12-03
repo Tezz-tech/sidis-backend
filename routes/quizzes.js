@@ -405,22 +405,24 @@ router.post("/public/create", async (req, res) => {
 /* Now public listing returns only quizzes flagged as public     */
 /* ============================================================== */
 
-router.get("/public/sets", auth, async (req, res) => {
+// Remove 'auth' middleware from the public route
+router.get("/public/sets", async (req, res) => {  // Removed: auth,
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
 
+    // Fetch ALL quizzes (no isPublic filter since we want all)
     const [quizzes, total] = await Promise.all([
-      Quiz.find({ isPublic: false })
+      Quiz.find({})  // This fetches all quizzes
         .select("title subject difficulty numQuestions timeLimit createdAt authorName")
-        .populate("userId", "fullName") // Only get creator name
+        .populate("userId", "fullName")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
 
-      Quiz.countDocuments({ isPublic: true })
+      Quiz.countDocuments({})  // Count all quizzes
     ]);
 
     const formatted = quizzes.map(q => ({
@@ -446,18 +448,22 @@ router.get("/public/sets", auth, async (req, res) => {
     });
   } catch (e) {
     console.error("Fetch public quizzes error:", e);
-    res.status(500).json({ error: "Failed to fetch public quizzes" });
+    res.status(500).json({ 
+      success: false,  // Add this
+      error: "Failed to fetch public quizzes" 
+    });
   }
 });
 
 /* ============================================================== */
 /* PUBLIC: Get ANY public quiz by ID (hides correct answers)      */
 /* ============================================================== */
-router.get("/public/:id", auth, async (req, res) => {
+
+router.get("/public/:id", async (req, res) => {  // Removed: auth,
   try {
+    // Removed isPublic: false filter to allow all quizzes
     const quiz = await Quiz.findOne({
-      _id: req.params.id,
-      isPublic: false  // This line is CRITICAL — blocks private quizzes
+      _id: req.params.id
     })
     .populate("userId", "fullName")
     .lean();
@@ -465,7 +471,7 @@ router.get("/public/:id", auth, async (req, res) => {
     if (!quiz) {
       return res.status(404).json({
         success: false,
-        error: "Quiz not found or not public"
+        error: "Quiz not found"
       });
     }
 
@@ -473,6 +479,7 @@ router.get("/public/:id", auth, async (req, res) => {
     const safeQuestions = quiz.questions.map(q => ({
       question: q.question,
       options: q.options
+      // Don't include correctAnswer
     }));
 
     res.json({
@@ -491,7 +498,10 @@ router.get("/public/:id", auth, async (req, res) => {
     });
   } catch (e) {
     console.error("Fetch public quiz error:", e);
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ 
+      success: false,
+      error: "Server error" 
+    });
   }
 });
 

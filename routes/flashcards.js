@@ -355,8 +355,7 @@ router.post("/public/create", async (req, res) => {
       authorName: authorName?.trim() || null,
       title: title.trim(),
       subject: subject.trim(),
-      cards: validCards.map(c => ({ question: c.question.trim(), answer: c.answer.trim(), masteryLevel: 0 })),
-      isPublic: true,
+      cards: validCards.map(c => ({ question: c.question.trim(), answer: c.answer.trim(), masteryLevel: 0 }))
     });
 
     await set.save();
@@ -369,14 +368,16 @@ router.post("/public/create", async (req, res) => {
 });
 
 /* List all flashcard sets (public) */
-router.get("/public/sets", auth, async (req, res) => {
+// Remove auth from public sets route
+router.get("/public/sets", async (req, res) => {  // Removed: auth
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
 
+    // Fetch ALL flashcard sets (no isPublic filter)
     const [sets, total] = await Promise.all([
-      FlashcardSet.find({ isPublic: true })
+      FlashcardSet.find({})  // Removed: isPublic: true
         .select("title subject cards createdAt lastStudied authorName")
         .populate("userId", "fullName")
         .sort({ createdAt: -1 })
@@ -384,7 +385,7 @@ router.get("/public/sets", auth, async (req, res) => {
         .limit(limit)
         .lean(),
 
-      FlashcardSet.countDocuments({ isPublic: true })
+      FlashcardSet.countDocuments({})  // Removed: isPublic: true
     ]);
 
     const formatted = sets.map(s => ({
@@ -409,19 +410,22 @@ router.get("/public/sets", auth, async (req, res) => {
     });
   } catch (err) {
     console.error("Fetch public flashcard sets error:", err);
-    res.status(500).json({ error: "Failed to fetch public flashcard sets" });
+    res.status(500).json({ 
+      success: false, 
+      error: "Failed to fetch public flashcard sets" 
+    });
   }
 });
 
 /* ============================================================== */
-/* PUBLIC: Get any public flashcard set by ID (full cards OK)     */
-/* Flashcards don't have "correct answers" → safe to show all     */
+/* PUBLIC: Get any flashcard set by ID (full cards OK)            */
 /* ============================================================== */
-router.get("/public/sets/:id", auth, async (req, res) => {
+router.get("/public/sets/:id", async (req, res) => {  // Removed: auth
   try {
+    // Remove isPublic filter to allow all sets
     const set = await FlashcardSet.findOne({
-      _id: req.params.id,
-      isPublic: true
+      _id: req.params.id
+      // Removed: isPublic: true
     })
     .populate("userId", "fullName")
     .lean();
@@ -429,7 +433,7 @@ router.get("/public/sets/:id", auth, async (req, res) => {
     if (!set) {
       return res.status(404).json({
         success: false,
-        error: "Flashcard set not found or not public"
+        error: "Flashcard set not found"
       });
     }
 
@@ -446,8 +450,11 @@ router.get("/public/sets/:id", auth, async (req, res) => {
       }
     });
   } catch (err) {
-    console.error("Fetch public flashcard set error:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("Fetch flashcard set error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: "Server error" 
+    });
   }
 });
 
@@ -457,11 +464,18 @@ router.post("/public/sets/:id/study", auth, async (req, res) => {
     const { cardId, known } = req.body;
     const setId = req.params.id;
 
-    const set = await FlashcardSet.findOne({ _id: setId, isPublic: true }).lean();
-    if (!set) return res.status(404).json({ error: "Public set not found" });
+    // Remove isPublic filter
+    const set = await FlashcardSet.findOne({ _id: setId }).lean();  // Removed: isPublic: true
+    if (!set) return res.status(404).json({ 
+      success: false,
+      error: "Set not found" 
+    });
 
     const card = set.cards.find(c => c._id.toString() === cardId);
-    if (!card) return res.status(404).json({ error: "Card not found" });
+    if (!card) return res.status(404).json({ 
+      success: false,
+      error: "Card not found" 
+    });
 
     const delta = known ? 20 : -15;
 
@@ -478,10 +492,16 @@ router.post("/public/sets/:id/study", auth, async (req, res) => {
     progress.masteryLevel = Math.min(100, Math.max(0, progress.masteryLevel));
     await progress.save();
 
-    res.json({ success: true, masteryLevel: progress.masteryLevel });
+    res.json({ 
+      success: true, 
+      masteryLevel: progress.masteryLevel 
+    });
   } catch (err) {
     console.error("Study progress error:", err);
-    res.status(500).json({ error: "Failed to record progress" });
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to record progress" 
+    });
   }
 });
 
@@ -501,10 +521,16 @@ router.get("/public/sets/:id/progress", auth, async (req, res) => {
       };
     });
 
-    res.json({ success: true, progress: map });
+    res.json({ 
+      success: true, 
+      progress: map 
+    });
   } catch (err) {
     console.error("Fetch progress error:", err);
-    res.status(500).json({ error: "Failed to fetch progress" });
+    res.status(500).json({ 
+      success: false,
+      error: "Failed to fetch progress" 
+    });
   }
 });
 
