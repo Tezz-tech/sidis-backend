@@ -291,12 +291,42 @@ router.get("/sets", auth, async (req, res) => {
 });
 
 // ==================== GET ONE SET ====================
+// GET ONE SET — /flashcards/sets/:id (private)
 router.get("/sets/:id", auth, async (req, res) => {
   try {
-    const set = await FlashcardSet.findOne({ _id: req.params.id, userId: req.user.userId });
+    const set = await FlashcardSet.findOne({ 
+      _id: req.params.id, 
+      userId: req.user.userId 
+    }).lean();
+
     if (!set) return res.status(404).json({ error: "Flashcard set not found" });
-    res.json({ success: true, set });
+
+    // Fetch user's personal progress for this set
+    const progressRecords = await FlashcardProgress.find({
+      userId: req.user.userId,
+      setId: set._id
+    }).lean();
+
+    const progressMap = {};
+    progressRecords.forEach(p => {
+      progressMap[p.cardId.toString()] = p.masteryLevel;
+    });
+
+    // Merge progress into cards
+    const cardsWithProgress = set.cards.map(card => ({
+      ...card,
+      masteryLevel: progressMap[card._id.toString()] ?? card.masteryLevel ?? 0
+    }));
+
+    res.json({ 
+      success: true, 
+      set: {
+        ...set,
+        cards: cardsWithProgress
+      }
+    });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -316,7 +346,11 @@ router.delete("/sets/:id", auth, async (req, res) => {
 router.post("/sets/:id/study", auth, async (req, res) => {
   try {
     const { cardId, known } = req.body;
-    const set = await FlashcardSet.findOne({ _id: req.params.id, userId: req.user.userId });
+    const set = await FlashcardSet.findOne({ 
+      _id: req.params.id, 
+      userId: req.user.userId 
+    });
+
     if (!set) return res.status(404).json({ error: "Set not found" });
 
     const card = set.cards.id(cardId);
@@ -324,12 +358,18 @@ router.post("/sets/:id/study", auth, async (req, res) => {
 
     card.masteryLevel = Math.min(100, Math.max(0, card.masteryLevel + (known ? 20 : -15)));
     set.lastStudied = new Date();
-
     await set.save();
+
+    // Also sync to FlashcardProgress (optional, for consistency)
+    await FlashcardProgress.updateOne(
+      { userId: req.user.userId, setId: set._id, cardId },
+      { masteryLevel: card.masteryLevel, lastStudied: new Date() },
+      { upsert: true }
+    );
 
     res.json({ success: true, masteryLevel: card.masteryLevel });
   } catch (err) {
-    res.status(500).json({ error: "Failed to update progress" });
+    res.status(500).json({ error: "Failed to update" });
   }
 });
 
@@ -420,41 +460,42 @@ router.get("/public/sets", async (req, res) => {  // Removed: auth
 /* ============================================================== */
 /* PUBLIC: Get any flashcard set by ID (full cards OK)            */
 /* ============================================================== */
-router.get("/public/sets/:id", async (req, res) => {  // Removed: auth
+// PUBLIC: Get set with user progress
+router.get("/public/sets/:id", async (req, res) => {
   try {
-    // Remove isPublic filter to allow all sets
-    const set = await FlashcardSet.findOne({
-      _id: req.params.id
-      // Removed: isPublic: true
-    })
-    .populate("userId", "fullName")
-    .lean();
+    const set = await FlashcardSet.findById(req.params.id).lean();
+    if (!set) return res.status(404).json({ success: false, error: "Not found" });
 
-    if (!set) {
-      return res.status(404).json({
-        success: false,
-        error: "Flashcard set not found"
+    let cardsWithProgress = [...set.cards];
+
+    // If user is logged in, load their personal progress
+    if (req.user?.userId) {
+      const progressRecords = await FlashcardProgress.find({
+        userId: req.user.userId,
+        setId: set._id
+      }).lean();
+
+      const progressMap = {};
+      progressRecords.forEach(p => {
+        progressMap[p.cardId.toString()] = p.masteryLevel;
       });
+
+      cardsWithProgress = set.cards.map(card => ({
+        ...card,
+        masteryLevel: progressMap[card._id.toString()] ?? card.masteryLevel ?? 0
+      }));
     }
 
     res.json({
       success: true,
       set: {
-        id: set._id,
-        title: set.title,
-        subject: set.subject,
-        creator: set.userId?.fullName || set.authorName || "Anonymous",
-        cards: set.cards,
-        createdAt: set.createdAt,
-        lastStudied: set.lastStudied,
+        ...set,
+        cards: cardsWithProgress,
+        creator: set.userId?.fullName || set.authorName || "Anonymous"
       }
     });
   } catch (err) {
-    console.error("Fetch flashcard set error:", err);
-    res.status(500).json({ 
-      success: false,
-      error: "Server error" 
-    });
+    res.status(500).json({ success: false, error: "Server error" });
   }
 });
 
