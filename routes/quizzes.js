@@ -1,4 +1,4 @@
-// routes/quiz.js (fully fixed based on latest Google Gemini API docs - Nov 30, 2025)
+// routes/quiz.js (with manual quiz creation for admins)
 const express = require("express");
 const router = express.Router();
 const auth = require("../middlewares/auth");
@@ -20,15 +20,9 @@ if (GEMINI_API_KEYS.length === 0) {
   process.exit(1);
 }
 
-/* --------------------------------------------------------------
-   CORRECT MODEL NAMES (Updated to latest stable as of Nov 2025)
-   -------------------------------------------------------------- */
 const PRIMARY_MODEL = "gemini-2.5-flash"; 
 const FALLBACK_MODEL = "gemini-2.5-pro";
 
-/* --------------------------------------------------------------
-   3. AI Manager (Fixed for correct contents structure)
-   -------------------------------------------------------------- */
 class AIManager {
   constructor(keys) {
     this.keys = keys;
@@ -37,7 +31,6 @@ class AIManager {
     this.initCurrentModel();
   }
 
-  // Helper to get the model with the right config
   _getModel(key, modelName) {
     const genAI = new GoogleGenerativeAI(key);
     return genAI.getGenerativeModel({
@@ -47,7 +40,7 @@ class AIManager {
         topK: 40,
         topP: 0.95,
         maxOutputTokens: 8192,
-        responseMimeType: "application/json", // Crucial for clean JSON output
+        responseMimeType: "application/json",
       },
     });
   }
@@ -65,7 +58,6 @@ class AIManager {
   }
 
   tryFallback(key) {
-    // This is called inside the loop when PRIMARY_MODEL fails (e.g., 404)
     return this._getModel(key, FALLBACK_MODEL);
   }
 
@@ -92,7 +84,84 @@ class AIManager {
 const aiManager = new AIManager(GEMINI_API_KEYS);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// ==================== MAIN ROUTE: Generate Quiz ====================
+// ==================== NEW: MANUAL QUIZ CREATION (ADMIN ONLY) ====================
+router.post("/admin/create-manual", auth, async (req, res) => {
+  try {
+    const { title, subject, difficulty, timeLimit, questions } = req.body;
+
+    // Validate required fields
+    if (!title || !subject || !Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).json({ 
+        error: "Missing required fields: title, subject, and questions" 
+      });
+    }
+
+    // Validate each question structure
+    const validQuestions = questions.filter(q => {
+      return (
+        q.question &&
+        q.question.trim() !== "" &&
+        Array.isArray(q.options) &&
+        q.options.length === 4 &&
+        q.options.every(opt => opt && opt.trim() !== "") &&
+        typeof q.correctAnswer === "number" &&
+        q.correctAnswer >= 0 &&
+        q.correctAnswer <= 3
+      );
+    });
+
+    if (validQuestions.length === 0) {
+      return res.status(400).json({ 
+        error: "No valid questions found. Each question must have text, 4 options, and a correct answer (0-3)." 
+      });
+    }
+
+    if (validQuestions.length !== questions.length) {
+      return res.status(400).json({ 
+        error: `${questions.length - validQuestions.length} question(s) are invalid. Please check all questions.` 
+      });
+    }
+
+    // Create quiz
+    const quiz = new Quiz({
+      userId: req.user.userId,
+      title: title.trim(),
+      subject: subject.trim(),
+      difficulty: difficulty || "medium",
+      timeLimit: parseInt(timeLimit) || 30,
+      numQuestions: validQuestions.length,
+      questions: validQuestions.map(q => ({
+        question: q.question.trim(),
+        options: q.options.map(opt => opt.trim()),
+        correctAnswer: parseInt(q.correctAnswer)
+      })),
+      isAdminCreated: true,
+      isPublic: true, // Manual quizzes are public by default
+    });
+
+    await quiz.save();
+
+    res.status(201).json({
+      success: true,
+      id: quiz._id,
+      message: `Quiz created successfully with ${validQuestions.length} questions!`,
+      quiz: {
+        id: quiz._id,
+        title: quiz.title,
+        subject: quiz.subject,
+        numQuestions: quiz.numQuestions
+      }
+    });
+
+  } catch (err) {
+    console.error("Manual quiz creation error:", err);
+    res.status(500).json({ 
+      error: "Failed to create quiz: " + err.message 
+    });
+  }
+});
+
+// ==================== AI-GENERATED QUIZ (EXISTING) ====================
 router.post("/generate-quiz", auth, async (req, res) => {
   let model = aiManager.getCurrentModel();
   if (!model) return res.status(500).json({ error: "AI service unavailable" });
@@ -103,7 +172,6 @@ router.post("/generate-quiz", auth, async (req, res) => {
 
     let extractedText = "";
 
-    // --- TEXT EXTRACTION ---
     if (content && typeof content === "string" && content.trim().length > 50) {
       extractedText = content.trim();
     } else if (file) {
@@ -130,7 +198,6 @@ router.post("/generate-quiz", auth, async (req, res) => {
 
         for (const page of pdfData.Pages) {
           for (const text of page.Texts) {
-            // FIX: Use try/catch for decodeURIComponent to prevent 'URI malformed' crash
             try {
               extractedText += decodeURIComponent(text.R[0].T) + " ";
             } catch (e) {
@@ -151,7 +218,6 @@ router.post("/generate-quiz", auth, async (req, res) => {
       return res.status(400).json({ error: "No readable text found in file." });
     }
 
-    // --- AI GENERATION ---
     const safeContent = extractedText.slice(0, 60_000); 
 
     const prompt = `
@@ -179,17 +245,13 @@ router.post("/generate-quiz", auth, async (req, res) => {
     let rawResponse = "";
     let attempts = 0;
     
-    // Retry Loop
-    while (attempts < 6) { // Increased attempts for robustness
+    while (attempts < 6) {
       try {
-        // FIXED: Correct contents structure per latest docs - string for single-turn
         const result = await model.generateContent(prompt);
-        
-        // FIXED: Use result.response.text() for the output
         rawResponse = result.response.text().trim(); 
         
         if (rawResponse) {
-             break; // Success
+             break;
         } else {
              throw new Error("Empty response from AI.");
         }
@@ -197,16 +259,14 @@ router.post("/generate-quiz", auth, async (req, res) => {
         attempts++;
         console.warn(`Attempt ${attempts} failed:`, err.message);
 
-        // Handle 404 (Model Not Found) or initial failure
         if (err.message.includes("404 Not Found") || attempts === 1) {
             console.log(`Model 404'd or failed. Attempting Fallback Model (${FALLBACK_MODEL})...`);
             
             try {
-                // Set the model to fallback for subsequent attempts
                 model = aiManager.tryFallback(aiManager.keys[aiManager.currentIdx]);
             } catch (fallbackError) {
                  console.error("Fallback model initialization failed:", fallbackError.message);
-                 break; // Stop retrying if fallback fails to initialize
+                 break;
             }
             await sleep(2000); 
             continue; 
@@ -215,12 +275,12 @@ router.post("/generate-quiz", auth, async (req, res) => {
         const rotated = await aiManager.rotateIfNeeded(err);
         if (rotated) {
           model = rotated;
-          attempts = 0; // Reset attempts on successful key rotation
+          attempts = 0;
           await sleep(2000);
         } else if (err.status >= 500 || err.status === 429 || attempts < 6) {
            await sleep(2000 * attempts);
         } else {
-            break; // Break on unrecoverable error
+            break;
         }
       }
     }
@@ -229,14 +289,12 @@ router.post("/generate-quiz", auth, async (req, res) => {
       return res.status(500).json({ error: "Failed to generate quiz after multiple attempts. Check API key and content." });
     }
 
-    // --- PARSING ---
     let questions;
     try {
       questions = JSON.parse(rawResponse);
 
       if (!Array.isArray(questions)) throw new Error("AI did not return an array");
       
-      // Validate structure
       questions = questions.map(q => ({
           question: q.question,
           options: q.options,
@@ -245,15 +303,12 @@ router.post("/generate-quiz", auth, async (req, res) => {
 
     } catch (e) {
       console.error("JSON Parse Error:", e.message);
-      
-      // FIX: Ensure rawResponse is a string before calling .slice for debugging
       const debugSlice = typeof rawResponse === 'string' ? rawResponse.slice(0, 500) : "Response was not a string.";
       console.log("Raw Response was:", debugSlice);
 
       return res.status(500).json({ error: "AI response was malformed. Try again or simplify input." });
     }
 
-    // Save to DB
     const quiz = new Quiz({
       userId: req.user.userId,
       title: title?.trim() || "Untitled Quiz",
@@ -278,11 +333,8 @@ router.post("/generate-quiz", auth, async (req, res) => {
   }
 });
 
-/* ==============================================================
-   OTHER ROUTES: Quiz Management (unchanged)
-   ============================================================== */
+// ==================== OTHER ROUTES ====================
 
-/* List user's quiz sets */
 router.get("/sets", auth, async (req, res) => {
   try {
     const quizzes = await Quiz.find({ userId: req.user.userId }).sort({ createdAt: -1 });
@@ -311,7 +363,6 @@ router.get("/sets", auth, async (req, res) => {
   }
 });
 
-/* Get single quiz */
 router.get("/:id", auth, async (req, res) => {
   try {
     const quiz = await Quiz.findOne({ _id: req.params.id, userId: req.user.userId });
@@ -323,16 +374,13 @@ router.get("/:id", auth, async (req, res) => {
   }
 });
 
-/* Save quiz result (allow taking any quiz) */
 router.post("/quiz-results", auth, async (req, res) => {
   try {
     const { quizId, score, answers, timeSpent } = req.body;
     
-    // Allow taking any quiz — only ensure quiz exists
     const quiz = await Quiz.findById(quizId);
     if (!quiz) return res.status(404).json({ error: "Quiz not found" });
 
-    // Save result for current user
     const result = new QuizResult({
       userId: req.user.userId,
       quizId,
@@ -342,7 +390,6 @@ router.post("/quiz-results", auth, async (req, res) => {
     });
     await result.save();
 
-    // Optionally log activity (ActivityLog model available)
     try {
       const ActivityLog = require("../models/ActivityLog");
       await ActivityLog.create({
@@ -363,10 +410,6 @@ router.post("/quiz-results", auth, async (req, res) => {
   }
 });
 
-/* ============================================================== */
-/* PUBLIC: create a quiz without JWT (optional authorName).       */
-/* This route does NOT use auth middleware intentionally.         */
-/* ============================================================== */
 router.post("/public/create", async (req, res) => {
   try {
     const { title, subject, questions, difficulty = "medium", timeLimit = 30, authorName } = req.body;
@@ -375,12 +418,11 @@ router.post("/public/create", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields: title, subject, questions" });
     }
 
-    // basic validation for questions shape
     const validQuestions = questions.filter(q => q.question && Array.isArray(q.options) && q.options.length === 4 && (q.correctAnswer !== undefined));
     if (validQuestions.length === 0) return res.status(400).json({ error: "Questions are invalid or empty" });
 
     const quiz = new Quiz({
-      userId: null, // anonymous/public
+      userId: null,
       authorName: authorName?.trim() || null,
       title: title.trim(),
       subject: subject.trim(),
@@ -400,21 +442,14 @@ router.post("/public/create", async (req, res) => {
   }
 });
 
-/* ============================================================== */
-/* PUBLIC ROUTES: allow any authenticated user to browse/take any */
-/* Now public listing returns only quizzes flagged as public     */
-/* ============================================================== */
-
-// Remove 'auth' middleware from the public route
-router.get("/public/sets", async (req, res) => {  // Removed: auth,
+router.get("/public/sets", async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
 
-    // Fetch ALL quizzes (no isPublic filter since we want all)
     const [quizzes, total] = await Promise.all([
-      Quiz.find({})  // This fetches all quizzes
+      Quiz.find({})
         .select("title subject difficulty numQuestions timeLimit createdAt authorName")
         .populate("userId", "fullName")
         .sort({ createdAt: -1 })
@@ -422,7 +457,7 @@ router.get("/public/sets", async (req, res) => {  // Removed: auth,
         .limit(limit)
         .lean(),
 
-      Quiz.countDocuments({})  // Count all quizzes
+      Quiz.countDocuments({})
     ]);
 
     const formatted = quizzes.map(q => ({
@@ -449,18 +484,14 @@ router.get("/public/sets", async (req, res) => {  // Removed: auth,
   } catch (e) {
     console.error("Fetch public quizzes error:", e);
     res.status(500).json({ 
-      success: false,  // Add this
+      success: false,
       error: "Failed to fetch public quizzes" 
     });
   }
 });
 
-/* ============================================================== */
-/* PUBLIC: Get ANY public quiz by ID (hides correct answers)      */
-/* ============================================================== */
-router.get("/public/:id", async (req, res) => {  // Removed: auth,
+router.get("/public/:id", async (req, res) => {
   try {
-    // Removed isPublic: false filter to allow all quizzes
     const quiz = await Quiz.findOne({
       _id: req.params.id
     })
@@ -474,11 +505,9 @@ router.get("/public/:id", async (req, res) => {  // Removed: auth,
       });
     }
 
-    // NEVER send correctAnswer to frontend
     const safeQuestions = quiz.questions.map(q => ({
       question: q.question,
       options: q.options
-      // Don't include correctAnswer
     }));
 
     res.json({
@@ -504,7 +533,6 @@ router.get("/public/:id", async (req, res) => {  // Removed: auth,
   }
 });
 
-// ==================== Get result by quiz id (for current user) ====================
 router.get("/quiz-results/:quizId", auth, async (req, res) => {
   try {
     const result = await QuizResult.findOne({
@@ -512,7 +540,6 @@ router.get("/quiz-results/:quizId", auth, async (req, res) => {
       userId: req.user.userId
     });
 
-    // Return success with null when user hasn't taken the quiz yet
     if (!result) return res.json({ success: true, result: null });
 
     res.json({ success: true, result });
