@@ -467,8 +467,6 @@ router.post("/flashcards", async (req, res) => {
   }
 });
 
-module.exports = router;
-
 /* Update flashcard set (admin only) */
 router.patch("/flashcards/:setId", async (req, res) => {
   try {
@@ -863,6 +861,126 @@ ${safeText}
   } catch (err) {
     console.error("Admin generate flashcards error:", err);
     res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ==================== FINANCE SUMMARY ====================
+router.get("/finance/summary", async (req, res) => {
+  try {
+    const totalUsers = await User.countDocuments();
+    const activeUsers = await User.countDocuments({
+      lastActive: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+    });
+    const totalQuizAttempts = await QuizResult.countDocuments();
+    const totalQuizzes = await Quiz.countDocuments();
+    const totalFlashcards = await FlashcardSet.countDocuments();
+
+    // Daily activity for last 30 days
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const dailyActivity = await ActivityLog.aggregate([
+      { $match: { timestamp: { $gte: thirtyDaysAgo } } },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: "%Y-%m-%d", date: "$timestamp" }
+          },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { _id: 1 } },
+      { $limit: 30 }
+    ]);
+
+    // Top quiz subjects by attempt volume
+    const topSubjects = await QuizResult.aggregate([
+      {
+        $lookup: {
+          from: "quizzes",
+          localField: "quizId",
+          foreignField: "_id",
+          as: "quiz"
+        }
+      },
+      { $unwind: { path: "$quiz", preserveNullAndEmptyArrays: true } },
+      {
+        $group: {
+          _id: "$quiz.subject",
+          attempts: { $sum: 1 },
+          avgScore: { $avg: "$score" }
+        }
+      },
+      { $sort: { attempts: -1 } },
+      { $limit: 8 }
+    ]);
+
+    res.json({
+      success: true,
+      summary: {
+        totalUsers,
+        activeUsers,
+        totalQuizAttempts,
+        totalQuizzes,
+        totalFlashcards,
+        engagementRate: totalUsers > 0 ? Math.round((activeUsers / totalUsers) * 100) : 0,
+      },
+      dailyActivity: dailyActivity.map(d => ({ date: d._id, count: d.count })),
+      topSubjects: topSubjects.map(s => ({
+        subject: s._id || "General",
+        attempts: s.attempts,
+        avgScore: Math.round(s.avgScore || 0),
+      })),
+    });
+  } catch (err) {
+    console.error("Finance summary error:", err);
+    res.status(500).json({ error: "Failed to fetch finance summary" });
+  }
+});
+
+// ==================== OPERATIONS HEALTH ====================
+router.get("/operations/health", async (req, res) => {
+  try {
+    const [
+      totalUsers,
+      totalQuizzes,
+      totalFlashcards,
+      totalResults,
+      totalLogs,
+      recentErrors
+    ] = await Promise.all([
+      User.countDocuments(),
+      Quiz.countDocuments(),
+      FlashcardSet.countDocuments(),
+      QuizResult.countDocuments(),
+      ActivityLog.countDocuments(),
+      ActivityLog.find({ action: { $regex: /error|fail/i } })
+        .sort({ timestamp: -1 })
+        .limit(5)
+        .lean()
+    ]);
+
+    const dbStats = {
+      users: totalUsers,
+      quizzes: totalQuizzes,
+      flashcards: totalFlashcards,
+      quizResults: totalResults,
+      activityLogs: totalLogs,
+    };
+
+    res.json({
+      success: true,
+      status: "healthy",
+      uptime: Math.round(process.uptime()),
+      memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      dbStats,
+      recentErrors: recentErrors.map(e => ({
+        action: e.action,
+        timestamp: e.timestamp,
+        details: e.details,
+      })),
+    });
+  } catch (err) {
+    console.error("Operations health error:", err);
+    res.status(500).json({ error: "Failed to fetch operations health" });
   }
 });
 
