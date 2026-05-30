@@ -181,7 +181,7 @@ router.post("/generate-quiz", auth, async (req, res) => {
   try {
     const {
       title, subject, numQuestions = 10, difficulty = "medium",
-      timeLimit = 30, content, source = "text", topic,
+      timeLimit = 30, content, source = "text", topic, url,
       questionType = "mcq", bankSubject
     } = req.body;
 
@@ -252,6 +252,44 @@ router.post("/generate-quiz", auth, async (req, res) => {
         }
       }
       if (!extractedText.trim()) return res.status(400).json({ error: "No readable text in uploaded files" });
+    }
+    // ---- Source: URL ----
+    else if (source === "url") {
+      const targetUrl = (req.body.url || "").trim();
+      if (!targetUrl.match(/^https?:\/\/.+/)) {
+        return res.status(400).json({ error: "Please provide a valid URL starting with http:// or https://" });
+      }
+      try {
+        const axios = require("axios");
+        const response = await axios.get(targetUrl, {
+          timeout: 15000,
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; Sidis/1.0; +https://sidis.app)" },
+          maxContentLength: 5 * 1024 * 1024,
+          responseType: "text",
+        });
+        let html = response.data || "";
+        // Strip scripts, styles, and their contents first
+        html = html.replace(/<script[\s\S]*?<\/script>/gi, " ");
+        html = html.replace(/<style[\s\S]*?<\/style>/gi, " ");
+        // Strip all remaining HTML tags
+        html = html.replace(/<[^>]+>/g, " ");
+        // Decode common HTML entities
+        html = html
+          .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+          .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+          .replace(/&[a-z]+;/gi, " ");
+        extractedText = html.replace(/\s+/g, " ").trim();
+        if (extractedText.length < 200) {
+          return res.status(400).json({ error: "Not enough readable text found at this URL. Try a different page or paste the text directly." });
+        }
+      } catch (urlErr) {
+        const msg = urlErr.code === "ECONNREFUSED" ? "Could not connect to the URL — check it is publicly accessible"
+                  : urlErr.code === "ETIMEDOUT"    ? "URL request timed out — try again or use a faster page"
+                  : urlErr.response               ? `URL returned status ${urlErr.response.status} — the page may be blocked`
+                  : "Failed to fetch URL: " + (urlErr.message || "Unknown error");
+        return res.status(400).json({ error: msg });
+      }
     }
     // ---- Source: single pdf/text (legacy) ----
     else {
