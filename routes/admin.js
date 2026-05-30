@@ -207,18 +207,18 @@ router.patch("/users/:userId/toggle-active", async (req, res) => {
     const user = await User.findById(req.params.userId);
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    user.isActive = !user.isActive;
-    await user.save();
+    const newActive = !user.isActive;
+    await User.updateOne({ _id: req.params.userId }, { $set: { isActive: newActive } });
 
     await ActivityLog.create({
       userId: req.user.userId,
-      action: user.isActive ? "user_activated" : "user_deactivated",
+      action: newActive ? "user_activated" : "user_deactivated",
       entityType: "user",
       entityId: user._id,
       details: { adminAction: true },
     });
 
-    res.json({ success: true, message: `User ${user.isActive ? "activated" : "deactivated"}` });
+    res.json({ success: true, message: `User ${newActive ? "activated" : "deactivated"}` });
   } catch (err) {
     res.status(500).json({ error: "Server error" });
   }
@@ -230,8 +230,7 @@ router.patch("/users/:userId/make-admin", async (req, res) => {
     const user = await User.findById(req.params.userId);
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    user.isAdmin = true;
-    await user.save();
+    await User.updateOne({ _id: req.params.userId }, { $set: { isAdmin: true } });
 
     await ActivityLog.create({
       userId: req.user.userId,

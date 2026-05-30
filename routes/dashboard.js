@@ -115,30 +115,42 @@ router.get('/', auth, async (req, res) => {
       0.1 * streakBonus
     );
 
-    // Update user document
-    user.quizzesTaken = quizzesTaken;
-    user.averageScore = averageScore;
-    user.totalScore = totalScore;
-    user.accuracy = accuracy;
-    user.hoursPracticed = parseFloat(hoursPracticed.toFixed(1));
-    user.currentStreak = currentStreak;
-    user.bestStreak = bestStreak;
-    user.weeklyImprovement = weeklyImprovement;
-    user.lastQuizDate = results.length > 0 ? results[0].createdAt : user.lastQuizDate;
-    await user.save();
+    // Update only the computed stats — use updateOne to bypass full-document
+    // validation (avoids Mongoose 8.x cast errors on gamification Mixed fields)
+    await User.updateOne(
+      { _id: userId },
+      {
+        $set: {
+          quizzesTaken,
+          averageScore,
+          totalScore,
+          accuracy,
+          hoursPracticed:    parseFloat(hoursPracticed.toFixed(1)),
+          currentStreak,
+          bestStreak,
+          weeklyImprovement,
+          lastQuizDate: results.length > 0 ? results[0].createdAt : (user.lastQuizDate || null),
+        },
+      }
+    );
 
-    // GLOBAL RANKING
-    const leaderboard = await User.find({ quizzesTaken: { $gt: 0 } })
-      .sort({ averageScore: -1, totalScore: -1 })
-      .select('_id averageScore')
-      .lean();
+    // GLOBAL RANKING — isolated so a DB hiccup here never kills the dashboard
+    let myRank = null, totalUsers = 0, myPercentile = 0;
+    try {
+      const leaderboard = await User.find({ quizzesTaken: { $gt: 0 } })
+        .sort({ averageScore: -1, totalScore: -1 })
+        .select('_id averageScore')
+        .lean();
 
-    const myRankIdx = leaderboard.findIndex(u => u._id.toString() === userId);
-    const myRank = myRankIdx >= 0 ? myRankIdx + 1 : null;
-    const totalUsers = leaderboard.length;
-    const myPercentile = totalUsers > 0 && myRank
-      ? Math.round(((totalUsers - myRank + 1) / totalUsers) * 100)
-      : 0;
+      const myRankIdx = leaderboard.findIndex(u => u._id.toString() === userId);
+      myRank     = myRankIdx >= 0 ? myRankIdx + 1 : null;
+      totalUsers = leaderboard.length;
+      myPercentile = totalUsers > 0 && myRank
+        ? Math.round(((totalUsers - myRank + 1) / totalUsers) * 100)
+        : 0;
+    } catch (rankErr) {
+      console.error("Ranking query failed (non-fatal):", rankErr.message);
+    }
 
     res.json({
       success: true,

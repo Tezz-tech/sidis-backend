@@ -43,10 +43,13 @@ router.get('/profile', auth, async (req, res) => {
     const newBadges  = checkNewBadges(user, results);
 
     if (newBadges.length > 0 || user.level !== levelInfo.level) {
+      const update = { $set: { level: levelInfo.level } };
+      if (newBadges.length > 0) update.$addToSet = { badges: { $each: newBadges } };
+      await User.updateOne({ _id: userId }, update);
+      // Keep in-memory user in sync for the response below
+      user.level  = levelInfo.level;
       if (newBadges.length > 0)
         user.badges = [...new Set([...(user.badges || []), ...newBadges])];
-      user.level = levelInfo.level;
-      await user.save();
     }
 
     const allBadges = Object.entries(BADGE_DEFS).map(([id, def]) => ({
@@ -115,8 +118,10 @@ router.post('/wager', auth, async (req, res) => {
     if (wager > (user.xp || 0))
       return res.status(400).json({ error: `Insufficient XP. You have ${user.xp || 0} XP.` });
 
-    user.activeWager = { quizId, wagerAmount: wager };
-    await user.save();
+    await User.updateOne(
+      { _id: req.user.userId },
+      { $set: { activeWager: { quizId, wagerAmount: wager } } }
+    );
 
     res.json({ success: true, wager: { quizId, wagerAmount: wager } });
   } catch (err) {
@@ -416,15 +421,17 @@ router.post('/buy-powerup', auth, async (req, res) => {
     if ((user.xp || 0) < cost)
       return res.status(400).json({ error: `Need ${cost} XP. You have ${user.xp || 0}.` });
 
-    user.xp -= cost;
-    user.powerUps = user.powerUps || { timeFreeze: 0, fiftyFifty: 0, hint: 0, doubleXP: 0 };
-    user.powerUps[powerUp] = (user.powerUps[powerUp] || 0) + 1;
-    await user.save();
+    // Use atomic $inc so Mixed-type powerUps field is actually persisted
+    await User.updateOne(
+      { _id: req.user.userId },
+      { $inc: { xp: -cost, [`powerUps.${powerUp}`]: 1 } }
+    );
 
     res.json({
-      success: true, powerUp,
-      quantity: user.powerUps[powerUp],
-      xpRemaining: user.xp,
+      success:     true,
+      powerUp,
+      quantity:    (user.powerUps?.[powerUp] || 0) + 1,
+      xpRemaining: (user.xp || 0) - cost,
     });
   } catch (err) {
     console.error('Buy power-up error:', err);
@@ -439,18 +446,21 @@ router.post('/use-powerup', auth, async (req, res) => {
     const user = await User.findById(req.user.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    user.powerUps = user.powerUps || { timeFreeze: 0, fiftyFifty: 0, hint: 0, doubleXP: 0 };
-    if ((user.powerUps[powerUp] || 0) <= 0)
+    const powerUps = user.powerUps || { timeFreeze: 0, fiftyFifty: 0, hint: 0, doubleXP: 0 };
+    if ((powerUps[powerUp] || 0) <= 0)
       return res.status(400).json({ error: 'No power-ups of this type available' });
 
-    user.powerUps[powerUp] -= 1;
-    if (powerUp === 'doubleXP') user.doubleXPActive = true;
-    await user.save();
+    const updateOp = {
+      $inc: { [`powerUps.${powerUp}`]: -1 },
+    };
+    if (powerUp === 'doubleXP') updateOp.$set = { doubleXPActive: true };
+    await User.updateOne({ _id: req.user.userId }, updateOp);
 
     res.json({
-      success: true, powerUp,
-      remaining: user.powerUps[powerUp],
-      doubleXPActive: user.doubleXPActive || false,
+      success:        true,
+      powerUp,
+      remaining:      (powerUps[powerUp] || 0) - 1,
+      doubleXPActive: powerUp === 'doubleXP' ? true : (user.doubleXPActive || false),
     });
   } catch (err) {
     console.error('Use power-up error:', err);
@@ -468,10 +478,12 @@ router.post('/name-buddy', auth, async (req, res) => {
     const user = await User.findById(req.user.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    user.studyBuddyName = name.trim();
-    await user.save();
+    await User.updateOne(
+      { _id: req.user.userId },
+      { $set: { studyBuddyName: name.trim() } }
+    );
 
-    res.json({ success: true, name: user.studyBuddyName });
+    res.json({ success: true, name: name.trim() });
   } catch (err) {
     console.error('Name buddy error:', err);
     res.status(500).json({ error: 'Server error' });

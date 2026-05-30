@@ -1,4 +1,5 @@
 // utils/gamificationUtils.js — shared XP / level / badge logic
+const mongoose = require('mongoose');
 
 const BADGE_DEFS = {
   first_quiz:    { name: 'First Steps',     desc: 'Complete your first quiz',              emoji: '🎯', rarity: 'common'    },
@@ -204,12 +205,31 @@ async function awardXP(user, results, { baseXP = 0, reason = '', score = null, t
     newBadges.push('level_5');
   }
 
-  await user.save();
+  // Use updateOne instead of user.save() to bypass Mongoose full-document
+  // validation and to correctly persist Mixed-type fields (activeWager, powerUps)
+  // which Mongoose doesn't detect as modified without markModified().
+  const User = mongoose.model('User');
+
+  const setFields = {
+    xp:             user.xp,
+    level:          user.level,
+    doubleXPActive: user.doubleXPActive || false,
+    lastDailyBonus: user.lastDailyBonus || null,
+    totalWagersWon: user.totalWagersWon || 0,
+    activeWager:    user.activeWager    || { quizId: null, wagerAmount: 0 },
+  };
+
+  const updateOp = { $set: setFields };
+  if (newBadges.length > 0) {
+    updateOp.$addToSet = { badges: { $each: [...new Set(newBadges)] } };
+  }
+
+  await User.updateOne({ _id: user._id }, updateOp);
 
   return {
     xpGained,
     totalXP: user.xp,
-    level: user.level,
+    level:   user.level,
     leveledUp,
     newBadges,
     bonuses,
