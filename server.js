@@ -6,6 +6,7 @@ const dashboardRoutes = require('./routes/dashboard');
 const quizRoutes = require('./routes/quizzes');
 const adminRoutes = require('./routes/admin');
 const flashcardRoutes = require('./routes/flashcards');
+const gamificationRoutes = require('./routes/gamification');
 const fileUpload = require('express-fileupload');
 const cors = require('cors');
 require('dotenv').config();
@@ -74,6 +75,7 @@ if (!adminRouter || (typeof adminRouter !== 'function' && typeof adminRouter !==
 }
 
 app.use('/api/flashcards', flashcardRoutes);
+app.use('/api/gamification', gamificationRoutes);
 
 // -------------------------------------------------
 // 5. Global error handler (still sends CORS headers)
