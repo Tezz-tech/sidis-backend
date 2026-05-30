@@ -7,7 +7,10 @@ const QuizResult = require("../models/QuizResult");
 const PDFParser = require("pdf2json");
 const mammoth = require("mammoth");
 require("dotenv").config();
-const { awardXP } = require("../utils/gamificationUtils");
+
+// Safe import — gamificationUtils only exists when running the full local/deployed backend
+let awardXP = null;
+try { ({ awardXP } = require("../utils/gamificationUtils")); } catch (_) {}
 
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
@@ -595,19 +598,21 @@ router.post("/quiz-results", auth, async (req, res) => {
     // ── Auto-award XP for completing this quiz ──
     let xpAward = null;
     try {
-      const User = require("../models/User");
-      const user = await User.findById(req.user.userId);
-      if (user) {
-        const baseXP = Math.round(10 + (score / 10)); // 10–20 XP based on score
-        const allResults = await QuizResult.find({ userId: req.user.userId });
-        xpAward = await awardXP(user, allResults, {
-          baseXP,
-          reason:    "quiz_complete",
-          score,
-          timeSpent,
-          timeLimit: quiz.timeLimit || 0,
-          quizId:    quiz._id,
-        });
+      if (awardXP) {
+        const User = require("../models/User");
+        const user = await User.findById(req.user.userId);
+        if (user) {
+          const baseXP = Math.round(10 + (score / 10));
+          const allResults = await QuizResult.find({ userId: req.user.userId });
+          xpAward = await awardXP(user, allResults, {
+            baseXP,
+            reason:    "quiz_complete",
+            score,
+            timeSpent,
+            timeLimit: quiz.timeLimit || 0,
+            quizId:    quiz._id,
+          });
+        }
       }
     } catch (xpErr) {
       console.error("XP award error (non-fatal):", xpErr.message);
