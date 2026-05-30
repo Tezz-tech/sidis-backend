@@ -317,43 +317,57 @@ router.post("/generate-quiz", auth, async (req, res) => {
     const safeContent = extractedText.slice(0, 60_000);
     const isTopicOnly = source === "topic";
 
+    // Determine if the user provided a meaningful subject or if we need AI to infer one
+    const userSubject = subject?.trim();
+    const needsSubjectInference = !userSubject || userSubject.toLowerCase() === 'general';
+    // For topic-based quizzes without a subject, use the topic itself as the subject
+    const resolvedSubject = needsSubjectInference && isTopicOnly
+      ? (topic?.trim() || 'General')
+      : (userSubject || 'General');
+
     let prompt;
     if (questionType === "essay") {
       prompt = `
 You are a teacher creating SHORT ANSWER / ESSAY questions.
-Subject: ${subject || "General"}
+${needsSubjectInference ? `The content covers an academic topic — identify it.` : `Subject: ${resolvedSubject}`}
 Difficulty: ${difficulty}
 Count: ${numQuestions} questions
 ${isTopicOnly ? `Topic: ${topic}` : `Based strictly on the provided text.`}
 
-Return a JSON array ONLY:
-[
-  {
-    "question": "Essay question text?",
-    "modelAnswer": "Comprehensive model answer here.",
-    "explanation": "Why this answer is correct."
-  }
-]
+Return a JSON OBJECT with this exact structure:
+{
+  "subject": "${needsSubjectInference ? 'the specific academic subject (e.g. Accounting, Biology, Psychology — never use General)' : resolvedSubject}",
+  "questions": [
+    {
+      "question": "Essay question text?",
+      "modelAnswer": "Comprehensive model answer here.",
+      "explanation": "Why this answer is correct."
+    }
+  ]
+}
 
 ${isTopicOnly ? "" : `Text:\n${safeContent}`}
       `.trim();
     } else {
       prompt = `
 You are a teacher creating a multiple-choice quiz.
-Subject: ${subject || "General"}
+${needsSubjectInference ? `The content covers an academic topic — identify it.` : `Subject: ${resolvedSubject}`}
 Difficulty: ${difficulty}
 Count: ${numQuestions} questions
 ${isTopicOnly ? `Topic: ${topic}` : `Based strictly on the provided text.`}
 
-Return a JSON array ONLY:
-[
-  {
-    "question": "Question text?",
-    "options": ["Option A", "Option B", "Option C", "Option D"],
-    "correctAnswer": 0,
-    "explanation": "Brief explanation of why this answer is correct."
-  }
-]
+Return a JSON OBJECT with this exact structure:
+{
+  "subject": "${needsSubjectInference ? 'the specific academic subject (e.g. Accounting, Biology, Psychology — never use General)' : resolvedSubject}",
+  "questions": [
+    {
+      "question": "Question text?",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "correctAnswer": 0,
+      "explanation": "Brief explanation of why this answer is correct."
+    }
+  ]
+}
 Note: correctAnswer is the index (0-3) of the correct option.
 
 ${isTopicOnly ? "" : `Text:\n${safeContent}`}
@@ -367,10 +381,20 @@ ${isTopicOnly ? "" : `Text:\n${safeContent}`}
     }
 
     let questions;
+    let aiInferredSubject = null;
     try {
       const cleaned = raw.replace(/^```json\s*|```$/gi, "").trim();
-      questions = JSON.parse(cleaned);
-      if (!Array.isArray(questions)) throw new Error("Not an array");
+      const parsed = JSON.parse(cleaned);
+
+      // Support both new object format {subject, questions} and legacy array format
+      if (Array.isArray(parsed)) {
+        questions = parsed;
+      } else if (parsed && Array.isArray(parsed.questions)) {
+        questions = parsed.questions;
+        aiInferredSubject = parsed.subject?.trim() || null;
+      } else {
+        throw new Error("Unexpected response format");
+      }
 
       if (questionType === "essay") {
         questions = questions
@@ -402,10 +426,15 @@ ${isTopicOnly ? "" : `Text:\n${safeContent}`}
       return res.status(500).json({ error: "No valid questions generated." });
     }
 
+    // Use AI-inferred subject when user left the field blank or set it to "General"
+    const finalSubject = needsSubjectInference && aiInferredSubject && aiInferredSubject.toLowerCase() !== 'general'
+      ? aiInferredSubject
+      : resolvedSubject;
+
     const quiz = new Quiz({
       userId: req.user.userId,
       title: title?.trim() || "Untitled Quiz",
-      subject: subject?.trim() || "General",
+      subject: finalSubject,
       difficulty,
       timeLimit: parseInt(timeLimit),
       numQuestions: questions.length,
