@@ -356,18 +356,26 @@ router.get('/sid-iq', auth, async (req, res) => {
       0.1 * streakBonus
     );
 
-    // Recommended quizzes on weak subjects
-    const recommendedQuizzes = weakSubjects.length > 0
-      ? await Quiz.find({
-          subject: { $in: weakSubjects.map(s => new RegExp(s, 'i')) },
-          isPublic: true
-        }).limit(5).select('title subject numQuestions difficulty').lean()
-      : await Quiz.find({ isPublic: true }).limit(5).select('title subject numQuestions difficulty').lean();
+    // User's stated interest subjects (passed from the SidIQ frontend after profiling)
+    const userInterests = req.query.interests
+      ? req.query.interests.split(',').map(s => s.trim()).filter(Boolean)
+      : [];
 
-    // AI study tip — generated from weak subjects if available
+    // Recommended quizzes — weak subjects take priority; fall back to interests; then random public
+    const searchSubjects = weakSubjects.length > 0 ? weakSubjects : userInterests;
+    const recommendedQuizzes = searchSubjects.length > 0
+      ? await Quiz.find({
+          subject: { $in: searchSubjects.map(s => new RegExp(s, 'i')) },
+          isPublic: true
+        }).limit(6).select('title subject numQuestions difficulty').lean()
+      : await Quiz.find({ isPublic: true }).limit(6).select('title subject numQuestions difficulty').lean();
+
+    // AI study tip
     let studyTip = "Keep practicing consistently to boost your exam readiness score!";
     if (weakSubjects.length > 0) {
       studyTip = `Focus on ${weakSubjects.join(', ')} — these are your weakest areas. Spending 20 minutes daily on targeted practice in these subjects can improve your score significantly.`;
+    } else if (userInterests.length > 0) {
+      studyTip = `Here are some ${userInterests.slice(0, 3).join(', ')} quizzes based on your interests. Complete them to start building your Sid IQ profile!`;
     } else if (strongSubjects.length > 0) {
       studyTip = `Great work on ${strongSubjects.join(', ')}! Maintain your momentum and challenge yourself with harder difficulty levels.`;
     }
