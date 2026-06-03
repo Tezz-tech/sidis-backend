@@ -1,21 +1,22 @@
 const mongoose = require('mongoose');
 
-const TopicSchema = new mongoose.Schema({
-  name:           { type: String, required: true },
-  priority:       { type: String, enum: ['high', 'medium', 'low'], default: 'medium' },
-  estimatedHours: { type: Number, default: 1 },
-  completed:      { type: Boolean, default: false },
-  completedAt:    { type: Date, default: null },
-  scheduledDate:  { type: Date, required: true },
-  notes:          { type: String, default: '' },
-});
+const PaperSchema = new mongoose.Schema({
+  date:           { type: Date,    required: true },
+  subject:        { type: String,  required: true },
+  notes:          { type: String,  default: '' },       // extracted PDF text or pasted notes
+  fileName:       { type: String,  default: '' },       // original filename if PDF
+  hasContent:     { type: Boolean, default: false },
+  generated:      { type: Boolean, default: false },
+  quizId:         { type: mongoose.Schema.Types.ObjectId, ref: 'Quiz',         default: null },
+  flashcardSetId: { type: mongoose.Schema.Types.ObjectId, ref: 'FlashcardSet', default: null },
+  quizTitle:      { type: String,  default: '' },
+  flashcardTitle: { type: String,  default: '' },
+}, { _id: true });
 
 const StudyPlanSchema = new mongoose.Schema({
   userId:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   examName:  { type: String, required: true },
-  subject:   { type: String, required: true },
-  examDate:  { type: Date, required: true },
-  topics:    [TopicSchema],
+  papers:    [PaperSchema],
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 });
