@@ -6,6 +6,21 @@ const User = require('../models/User');
 const QuizResult = require('../models/QuizResult');
 const Quiz = require('../models/Quiz');
 
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+require('dotenv').config();
+const GEMINI_KEYS = process.env.GEMINI_API_KEYS
+  ? process.env.GEMINI_API_KEYS.split(',').map(k => k.trim()).filter(Boolean) : [];
+let aiModel = null;
+if (GEMINI_KEYS.length > 0) {
+  try {
+    const genAI = new GoogleGenerativeAI(GEMINI_KEYS[0]);
+    aiModel = genAI.getGenerativeModel({
+      model: 'gemini-2.5-flash',
+      generationConfig: { temperature: 0.7, maxOutputTokens: 1024, responseMimeType: 'application/json' },
+    });
+  } catch (_) {}
+}
+
 // ── Subject resolver ──────────────────────────────────────────────────────────
 // Maps a quiz title/subject to a specific academic topic so "General" is never
 // shown as the topic name in the Sid IQ profile.
@@ -402,6 +417,139 @@ router.get('/sid-iq', auth, async (req, res) => {
   } catch (error) {
     console.error("Sid IQ error:", error);
     res.status(500).json({ success: false, error: "Server error" });
+  }
+});
+
+// ─── GET /api/dashboard/forecaster ────────────────────────────────────────────
+router.get('/forecaster', auth, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const [user, results] = await Promise.all([
+      User.findById(userId),
+      QuizResult.find({ userId }).sort({ createdAt: -1 }),
+    ]);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (results.length === 0) {
+      return res.json({
+        success: true,
+        totalQuizzes: 0,
+        learningSpeed: 'No Data',
+        learningSpeedDesc: 'Take a few quizzes to unlock your personal forecast.',
+        subjectAnalysis: [],
+        forecastedTopics: [],
+        weakSubjects: [],
+        strongSubjects: [],
+        aiInsight: null,
+      });
+    }
+
+    // Build per-subject performance timeline
+    const quizSubjectMap = await buildQuizSubjectMap(results);
+    const subjectData    = {};
+
+    for (const r of results) {
+      const tag = getResultSubject(r, quizSubjectMap);
+      if (!subjectData[tag]) subjectData[tag] = { scores: [], times: [] };
+      subjectData[tag].scores.push(r.score || 0);
+      if (r.timeSpent) subjectData[tag].times.push(r.timeSpent);
+    }
+
+    const subjectAnalysis = Object.entries(subjectData).map(([subject, data]) => {
+      const avgScore = Math.round(data.scores.reduce((a, b) => a + b, 0) / data.scores.length);
+      // trend: positive = improving (recent scores are higher than older ones)
+      const trend = data.scores.length >= 2
+        ? Math.round(data.scores[0] - data.scores[data.scores.length - 1])
+        : 0;
+      const avgTimeSec = data.times.length > 0
+        ? Math.round(data.times.reduce((a, b) => a + b, 0) / data.times.length) : null;
+
+      return {
+        subject,
+        avgScore,
+        attempts:  data.scores.length,
+        trend,
+        improving: trend > 5,
+        avgTimeSec,
+        status:    avgScore >= 80 ? 'strong' : avgScore >= 60 ? 'moderate' : 'weak',
+      };
+    }).sort((a, b) => a.avgScore - b.avgScore);
+
+    // Learning speed: compare recent 5 vs older 5
+    let learningSpeed     = 'Average';
+    let learningSpeedDesc = 'You improve at a steady, consistent pace.';
+    if (results.length >= 3) {
+      const recent   = results.slice(0, 5).map(r => r.score || 0);
+      const older    = results.slice(5, 10).map(r => r.score || 0);
+      if (older.length > 0) {
+        const delta = (recent.reduce((a, b) => a + b, 0) / recent.length) -
+                      (older.reduce((a, b) => a + b, 0) / older.length);
+        if (delta >= 15) {
+          learningSpeed     = 'Fast Learner';
+          learningSpeedDesc = `Scores jumped ${Math.round(delta)}% — you absorb new material quickly!`;
+        } else if (delta >= 5) {
+          learningSpeed     = 'Steady Learner';
+          learningSpeedDesc = 'Consistent, solid improvement — knowledge builds methodically.';
+        } else if (delta < -5) {
+          learningSpeed     = 'Needs Focus';
+          learningSpeedDesc = 'Scores dipped recently. Review past topics before moving forward.';
+        }
+      }
+    }
+
+    // Exam forecaster
+    const weakList = subjectAnalysis.filter(s => s.status === 'weak');
+    const modList  = subjectAnalysis.filter(s => s.status === 'moderate');
+
+    let forecastedTopics = [...weakList, ...modList].slice(0, 6).map(s => ({
+      topic:       s.subject,
+      confidence:  s.status === 'weak' ? 'High' : 'Medium',
+      reason:      s.status === 'weak'
+        ? `Low avg score (${s.avgScore}%) — examiners target weak areas`
+        : `Moderate score (${s.avgScore}%) — small improvements yield big gains`,
+      likelihood:  s.status === 'weak' ? 85 : 62,
+    }));
+
+    if (forecastedTopics.length === 0) {
+      forecastedTopics = subjectAnalysis.slice(0, 3).map(s => ({
+        topic:      s.subject + ' — Advanced',
+        confidence: 'Low',
+        reason:     `You score well (${s.avgScore}%) — challenge yourself with harder questions`,
+        likelihood: 40,
+      }));
+    }
+
+    // AI insight
+    let aiInsight = null;
+    if (aiModel && subjectAnalysis.length > 0) {
+      try {
+        const weakStr = weakList.map(s => `${s.subject}(${s.avgScore}%)`).join(', ') || 'none';
+        const prompt  = `A student's quiz data: ${results.length} quizzes, learning speed "${learningSpeed}".
+Weak subjects: ${weakStr}. Strong subjects: ${subjectAnalysis.filter(s => s.status === 'strong').map(s => s.subject).join(', ') || 'none'}.
+Write 2 concise exam forecast insights (each max 20 words) tailored to this data.
+Return JSON: { "insights": ["insight1", "insight2"] }`;
+
+        const raw    = await aiModel.generateContent(prompt);
+        const text   = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
+        const parsed = JSON.parse(text);
+        if (parsed.insights && parsed.insights.length > 0) aiInsight = parsed.insights;
+      } catch (_) {}
+    }
+
+    res.json({
+      success: true,
+      totalQuizzes: results.length,
+      learningSpeed,
+      learningSpeedDesc,
+      subjectAnalysis,
+      forecastedTopics,
+      weakSubjects:   weakList.map(s => s.subject),
+      strongSubjects: subjectAnalysis.filter(s => s.status === 'strong').map(s => s.subject),
+      aiInsight,
+    });
+  } catch (error) {
+    console.error('Forecaster error:', error);
+    res.status(500).json({ success: false, error: 'Server error' });
   }
 });
 

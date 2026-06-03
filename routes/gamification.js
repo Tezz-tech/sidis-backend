@@ -559,4 +559,140 @@ Return JSON: { "title": "short title", "body": "message body" }`;
   }
 });
 
+// ─── POST /api/gamification/spin-discount ─────────────────────────────────────
+const SPIN_COST = 50; // XP per spin
+const DISCOUNT_WHEEL = [
+  { label: '5% Off',  value: 5,  rarity: 'common',    weight: 35, emoji: '🎁' },
+  { label: '10% Off', value: 10, rarity: 'uncommon',  weight: 28, emoji: '🎀' },
+  { label: '15% Off', value: 15, rarity: 'rare',      weight: 20, emoji: '🎊' },
+  { label: '20% Off', value: 20, rarity: 'epic',      weight: 12, emoji: '⭐' },
+  { label: '25% Off', value: 25, rarity: 'legendary', weight: 4,  emoji: '💫' },
+  { label: '50% Off', value: 50, rarity: 'mythic',    weight: 1,  emoji: '🌟' },
+];
+
+function spinWheel() {
+  const total  = DISCOUNT_WHEEL.reduce((s, d) => s + d.weight, 0);
+  let rand     = Math.random() * total;
+  for (const slot of DISCOUNT_WHEEL) {
+    rand -= slot.weight;
+    if (rand <= 0) return slot;
+  }
+  return DISCOUNT_WHEEL[0];
+}
+
+router.post('/spin-discount', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if ((user.xp || 0) < SPIN_COST)
+      return res.status(400).json({ error: `Need ${SPIN_COST} XP to spin. You have ${user.xp || 0} XP.` });
+
+    const prize = spinWheel();
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30); // 30-day validity
+
+    const newDiscount = {
+      id:        `disc_${Date.now()}`,
+      label:     prize.label,
+      value:     prize.value,
+      rarity:    prize.rarity,
+      emoji:     prize.emoji,
+      code:      `SIDIS${prize.value}OFF${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+      expiresAt: expiresAt.toISOString(),
+      used:      false,
+    };
+
+    const currentDiscounts = Array.isArray(user.discounts) ? user.discounts : [];
+
+    await User.updateOne(
+      { _id: req.user.userId },
+      {
+        $inc: { xp: -SPIN_COST, spinCount: 1 },
+        $set: { discounts: [...currentDiscounts, newDiscount] },
+      }
+    );
+
+    res.json({
+      success:     true,
+      prize:       newDiscount,
+      xpRemaining: (user.xp || 0) - SPIN_COST,
+      spinCount:   (user.spinCount || 0) + 1,
+    });
+  } catch (err) {
+    console.error('Spin discount error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── GET /api/gamification/my-discounts ───────────────────────────────────────
+router.get('/my-discounts', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).select('discounts spinCount xp adsRemovedUntil');
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const now       = new Date();
+    const discounts = (Array.isArray(user.discounts) ? user.discounts : [])
+      .filter(d => !d.used && new Date(d.expiresAt) > now);
+
+    const adsActive = user.adsRemovedUntil && new Date(user.adsRemovedUntil) > now;
+
+    res.json({
+      success:         true,
+      discounts,
+      spinCount:       user.spinCount || 0,
+      xp:              user.xp || 0,
+      spinCost:        SPIN_COST,
+      adsActive,
+      adsRemovedUntil: user.adsRemovedUntil || null,
+    });
+  } catch (err) {
+    console.error('My discounts error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── POST /api/gamification/remove-ads ────────────────────────────────────────
+const ADS_PLANS = {
+  week:  { days: 7,  cost: 150, label: '7 Days Ad-Free'  },
+  month: { days: 30, cost: 400, label: '30 Days Ad-Free' },
+};
+
+router.post('/remove-ads', auth, async (req, res) => {
+  try {
+    const { plan = 'week' } = req.body;
+    if (!ADS_PLANS[plan])
+      return res.status(400).json({ error: 'Invalid plan. Choose "week" or "month".' });
+
+    const user = await User.findById(req.user.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const { days, cost, label } = ADS_PLANS[plan];
+    if ((user.xp || 0) < cost)
+      return res.status(400).json({ error: `Need ${cost} XP for ${label}. You have ${user.xp || 0} XP.` });
+
+    const now    = new Date();
+    // Extend from current expiry if already active
+    const base   = (user.adsRemovedUntil && new Date(user.adsRemovedUntil) > now)
+      ? new Date(user.adsRemovedUntil) : now;
+    const until  = new Date(base);
+    until.setDate(until.getDate() + days);
+
+    await User.updateOne(
+      { _id: req.user.userId },
+      { $inc: { xp: -cost }, $set: { adsRemovedUntil: until } }
+    );
+
+    res.json({
+      success:         true,
+      label,
+      adsRemovedUntil: until,
+      xpRemaining:     (user.xp || 0) - cost,
+    });
+  } catch (err) {
+    console.error('Remove ads error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 module.exports = router;

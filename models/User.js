@@ -49,6 +49,13 @@ const userSchema = new mongoose.Schema({
 
   // ── Study Buddy ───────────────────────────────────────
   studyBuddyName: { type: String, default: 'Siddy' },
+
+  // ── Discount Randomizer ───────────────────────────────
+  discounts:    { type: mongoose.Schema.Types.Mixed, default: () => [] },
+  spinCount:    { type: Number, default: 0 },
+
+  // ── Ads Remover ───────────────────────────────────────
+  adsRemovedUntil: { type: Date, default: null },
 });
 
 module.exports = mongoose.model('User', userSchema);

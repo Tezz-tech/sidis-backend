@@ -8,6 +8,8 @@ const adminRoutes = require('./routes/admin');
 const flashcardRoutes = require('./routes/flashcards');
 let gamificationRoutes = null;
 try { gamificationRoutes = require('./routes/gamification'); } catch (_) {}
+let studyPlannerRoutes = null;
+try { studyPlannerRoutes = require('./routes/studyplanner'); } catch (_) {}
 const fileUpload = require('express-fileupload');
 const cors = require('cors');
 require('dotenv').config();
@@ -76,7 +78,8 @@ if (!adminRouter || (typeof adminRouter !== 'function' && typeof adminRouter !==
 }
 
 app.use('/api/flashcards', flashcardRoutes);
-if (gamificationRoutes) app.use('/api/gamification', gamificationRoutes);
+if (gamificationRoutes)  app.use('/api/gamification',  gamificationRoutes);
+if (studyPlannerRoutes)  app.use('/api/study-planner', studyPlannerRoutes);
 
 // -------------------------------------------------
 // 5. Global error handler (still sends CORS headers)
