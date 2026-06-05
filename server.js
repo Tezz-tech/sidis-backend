@@ -142,3 +142,6 @@ app.use((err, req, res, next) => {
 // -------------------------------------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// Required for @vercel/node — export the Express app as the serverless handler
+module.exports = app;
