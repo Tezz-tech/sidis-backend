@@ -14,16 +14,24 @@ const SessionSchema = new mongoose.Schema({
   score:           { type: Number,  default: null },
 }, { _id: true });
 
+const SubjectMaterialSchema = new mongoose.Schema({
+  subject:    { type: String, required: true },
+  notes:      { type: String, default: '' },
+  fileName:   { type: String, default: '' },
+  hasContent: { type: Boolean, default: false },
+}, { _id: false });
+
 const StudyPlanSchema = new mongoose.Schema({
-  userId:          { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  examName:        { type: String, required: true },
-  examDate:        { type: Date,   required: true },
-  subjects:        [{ type: String }],
-  dailyStudyHours: { type: Number, default: 2 },
-  schedule:        [SessionSchema],
-  generated:       { type: Boolean, default: false },
-  createdAt:       { type: Date, default: Date.now },
-  updatedAt:       { type: Date, default: Date.now },
+  userId:           { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  examName:         { type: String, required: true },
+  examDate:         { type: Date,   required: true },
+  subjects:         [{ type: String }],
+  dailyStudyHours:  { type: Number, default: 2 },
+  schedule:         [SessionSchema],
+  subjectMaterials: [SubjectMaterialSchema],
+  generated:        { type: Boolean, default: false },
+  createdAt:        { type: Date, default: Date.now },
+  updatedAt:        { type: Date, default: Date.now },
 });
 
 module.exports = mongoose.model('StudyPlan', StudyPlanSchema);

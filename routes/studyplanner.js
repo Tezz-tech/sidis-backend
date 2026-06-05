@@ -197,8 +197,62 @@ Return ONLY valid JSON with no markdown:
   }
 });
 
+// ─── POST /api/study-planner/:planId/subject-material ─────────────────────────
+// Upload PDF or paste notes for a specific subject. Accepts multipart (field: pdf)
+// OR JSON { subject, notes }.
+router.post('/:planId/subject-material', auth, async (req, res) => {
+  try {
+    const plan = await StudyPlan.findOne({ _id: req.params.planId, userId: req.user.userId });
+    if (!plan) return res.status(404).json({ error: 'Plan not found' });
+
+    const subject = (req.body?.subject || '').trim();
+    if (!subject) return res.status(400).json({ error: 'subject field is required' });
+
+    let extractedText = '';
+    let fileName      = '';
+
+    if (req.files?.pdf) {
+      let pdfParse;
+      try { pdfParse = require('pdf-parse/lib/pdf-parse.js'); } catch (_) {
+        try { pdfParse = require('pdf-parse'); } catch (_2) {}
+      }
+      if (!pdfParse) return res.status(503).json({ error: 'PDF parser unavailable on this server.' });
+      try {
+        const parsed = await pdfParse(req.files.pdf.data);
+        extractedText = (parsed.text || '').trim();
+        fileName      = req.files.pdf.name || 'document.pdf';
+        if (!extractedText)
+          return res.status(422).json({ error: 'No text found in PDF. Use a text-based PDF or paste notes instead.' });
+      } catch (pdfErr) {
+        console.error('PDF parse error:', pdfErr.message);
+        return res.status(422).json({ error: 'PDF parsing failed. Try pasting notes as text.' });
+      }
+    } else if (req.body?.notes?.trim()) {
+      extractedText = req.body.notes.trim();
+    } else {
+      return res.status(400).json({ error: 'Send a PDF file (field: pdf) or a notes text body' });
+    }
+
+    // Upsert into subjectMaterials array
+    if (!plan.subjectMaterials) plan.subjectMaterials = [];
+    const idx = plan.subjectMaterials.findIndex(m => m.subject === subject);
+    const entry = { subject, notes: extractedText.slice(0, 50000), fileName, hasContent: true };
+    if (idx >= 0) plan.subjectMaterials[idx] = entry;
+    else          plan.subjectMaterials.push(entry);
+
+    plan.updatedAt = new Date();
+    await plan.save();
+
+    res.json({ success: true, subject, fileName, textLength: entry.notes.length });
+  } catch (err) {
+    console.error('Subject material error:', err);
+    res.status(500).json({ error: 'Failed to save material' });
+  }
+});
+
 // ─── POST /api/study-planner/:planId/session/:sessionId/start ─────────────────
-// Generates (or retrieves) a quiz for this session and returns its ID
+// Generates (or retrieves) a quiz for this session and returns its ID.
+// If the subject has uploaded material, questions are based on that material.
 router.post('/:planId/session/:sessionId/start', auth, async (req, res) => {
   try {
     const plan = await StudyPlan.findOne({ _id: req.params.planId, userId: req.user.userId });
@@ -215,13 +269,45 @@ router.post('/:planId/session/:sessionId/start', auth, async (req, res) => {
     if (!aiModel)
       return res.status(503).json({ error: 'AI generation unavailable. Check API key configuration.' });
 
-    const examDate   = new Date(plan.examDate).toDateString();
+    const examDate    = new Date(plan.examDate).toDateString();
     const sessionType = session.sessionType;
-    const subject    = session.subject;
-    const priority   = session.priority;
+    const subject     = session.subject;
+    const priority    = session.priority;
+    const mcqCount    = sessionType === 'review' ? 8 : 10;
+    const essayCount  = sessionType === 'review' ? 3 : 4;
 
-    const quizPrompt = `You are an expert exam question creator for ${subject}.
-Generate ${sessionType === 'review' ? 8 : 10} MCQ questions and ${sessionType === 'review' ? 3 : 4} short-answer questions for a study session.
+    // Check if user uploaded material for this subject
+    const subjectMaterial = (plan.subjectMaterials || []).find(
+      m => m.subject === subject && m.hasContent && m.notes?.trim()
+    );
+
+    let quizPrompt;
+    if (subjectMaterial) {
+      // Material-based: questions come directly from uploaded notes/PDF
+      quizPrompt = `You are an expert exam question creator for ${subject}.
+Based ONLY on the study material provided below, generate ${mcqCount} MCQ questions and ${essayCount} short-answer questions.
+
+Study Material:
+${subjectMaterial.notes.slice(0, 7000)}
+
+Rules:
+- Every question must be directly traceable to the study material above
+- MCQ: exactly 4 options, one correct answer, plausible distractors
+- Short-answer: 2–4 sentence model answers drawn from the material
+- Difficulty: ${priority === 'high' ? 'hard — exam-level' : 'medium — solid understanding'}
+- Session type: ${sessionType}
+
+Return ONLY valid JSON:
+{
+  "questions": [
+    { "type": "mcq", "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "..." },
+    { "type": "essay", "question": "...", "modelAnswer": "..." }
+  ]
+}`;
+    } else {
+      // Generic: no material uploaded, use subject knowledge
+      quizPrompt = `You are an expert exam question creator for ${subject}.
+Generate ${mcqCount} MCQ questions and ${essayCount} short-answer questions for a study session.
 
 Context:
 - Subject: ${subject}
@@ -238,20 +324,11 @@ Rules:
 Return ONLY valid JSON:
 {
   "questions": [
-    {
-      "type": "mcq",
-      "question": "...",
-      "options": ["A", "B", "C", "D"],
-      "correctAnswer": 0,
-      "explanation": "..."
-    },
-    {
-      "type": "essay",
-      "question": "...",
-      "modelAnswer": "..."
-    }
+    { "type": "mcq", "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "..." },
+    { "type": "essay", "question": "...", "modelAnswer": "..." }
   ]
 }`;
+    } // end else (no material)
 
     let generatedQuestions = [];
     try {
