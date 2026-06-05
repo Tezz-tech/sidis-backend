@@ -67,6 +67,34 @@ app.use(
 // -------------------------------------------------
 // 4. Routes
 // -------------------------------------------------
+
+// Quick health check — no auth, no router, impossible to intercept
+app.get('/api/health', async (req, res) => {
+  const { GoogleGenerativeAI } = require('@google/generative-ai');
+  const keys = process.env.GEMINI_API_KEYS
+    ? process.env.GEMINI_API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
+    : [];
+
+  let aiStatus = keys.length === 0 ? 'no keys set' : 'not tested';
+  if (keys.length > 0) {
+    try {
+      const genAI = new GoogleGenerativeAI(keys[0]);
+      const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+      const r = await model.generateContent('Say: ok');
+      aiStatus = r.response.text().trim() ? 'ok' : 'responded but empty';
+    } catch (e) {
+      aiStatus = e.message;
+    }
+  }
+
+  let pdfStatus = false;
+  try { require('pdf-parse/lib/pdf-parse.js'); pdfStatus = true; } catch (_) {
+    try { require('pdf-parse'); pdfStatus = true; } catch (_2) {}
+  }
+
+  res.json({ ai: aiStatus, pdfParse: pdfStatus, keys: keys.length });
+});
+
 app.use('/api/auth', authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/quizzes', quizRoutes);
