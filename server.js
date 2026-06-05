@@ -55,8 +55,9 @@ connectDB();
 app.use(express.json());
 app.use(
   fileUpload({
-    limits: { fileSize: 5 * 1024 * 1024 },
+    limits: { fileSize: 4 * 1024 * 1024 },  // 4 MB — Vercel hard limit is 4.5 MB
     abortOnLimit: true,
+    responseOnLimit: JSON.stringify({ error: 'File too large. Each file must be under 4 MB.' }),
     useTempFiles: false,
     safeFileNames: true,
     preserveExtension: true,
