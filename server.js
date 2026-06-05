@@ -7,13 +7,13 @@ const quizRoutes = require('./routes/quizzes');
 const adminRoutes = require('./routes/admin');
 const flashcardRoutes = require('./routes/flashcards');
 let gamificationRoutes = null;
-try { gamificationRoutes = require('./routes/gamification'); } catch (_) {}
+try { gamificationRoutes = require('./routes/gamification'); } catch (e) { console.error('gamification load error:', e.message); }
 let studyPlannerRoutes = null;
-try { studyPlannerRoutes = require('./routes/studyplanner'); } catch (_) {}
+try { studyPlannerRoutes = require('./routes/studyplanner'); } catch (e) { console.error('studyplanner load error:', e.message); }
 let forecasterRoutes = null;
-try { forecasterRoutes = require('./routes/forecaster'); } catch (_) {}
+try { forecasterRoutes = require('./routes/forecaster'); console.log('forecaster routes: loaded'); } catch (e) { console.error('forecaster load error:', e.message, e.stack); }
 let supportRoutes = null;
-try { supportRoutes = require('./routes/support'); } catch (_) {}
+try { supportRoutes = require('./routes/support'); } catch (e) { console.error('support load error:', e.message); }
 const fileUpload = require('express-fileupload');
 const cors = require('cors');
 require('dotenv').config();
@@ -23,17 +23,17 @@ const app = express();
 // -------------------------------------------------
 // 1. CORS – allow **every** origin
 // -------------------------------------------------
-app.use(
-  cors({
-    origin: true,               // reflect the request origin (allows any)
-    credentials: true,          // allow cookies / Authorization header
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-  })
-);
+const corsOptions = {
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  optionsSuccessStatus: 200,
+};
+app.use(cors(corsOptions));
 
-// Preflight for all routes
-app.options('*', cors());
+// Respond to ALL preflight OPTIONS requests immediately with 200
+app.options('*', cors(corsOptions));
 
 // -------------------------------------------------
 // 2. Make sure Vercel Serverless returns the headers
@@ -88,7 +88,17 @@ if (forecasterRoutes)    app.use('/api/forecaster',    forecasterRoutes);
 if (supportRoutes)       app.use('/api/support',       supportRoutes);
 
 // -------------------------------------------------
-// 5. Global error handler (still sends CORS headers)
+// 5. JSON 404 for any unmatched route (so CORS headers are always present)
+// -------------------------------------------------
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.status(404).json({ error: `Route not found: ${req.method} ${req.path}` });
+});
+
+// -------------------------------------------------
+// 6. Global error handler (still sends CORS headers)
 // -------------------------------------------------
 app.use((err, req, res, next) => {
   console.error(err.stack);
