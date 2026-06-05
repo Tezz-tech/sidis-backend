@@ -47,6 +47,27 @@ function sanitisePatterns(raw) {
     .filter(p => p.topic.length > 0);
 }
 
+// ─── GET /api/forecaster/health ───────────────────────────────────────────────
+// Open endpoint — no auth needed. Shows whether AI key and pdf-parse are ready.
+router.get('/health', async (req, res) => {
+  let aiStatus = 'not initialized — GEMINI_API_KEYS missing or empty';
+  if (aiModel) {
+    try {
+      const test = await aiModel.generateContent('Reply with exactly: {"ok":true}');
+      const txt  = test.response.text().trim();
+      JSON.parse(txt); // will throw if Gemini returned something unexpected
+      aiStatus = 'ok';
+    } catch (e) {
+      aiStatus = `key error: ${e.message}`;
+    }
+  }
+  res.json({
+    pdfParse: !!pdfParse,
+    ai:       aiStatus,
+    keys:     GEMINI_KEYS.length,
+  });
+});
+
 // ─── POST /api/forecaster/analyze ─────────────────────────────────────────────
 router.post('/analyze', auth, async (req, res) => {
   try {
