@@ -1,9 +1,17 @@
-// routes/forecaster.js — Exam Forecaster (upload past papers, analyse, generate mock exams)
+// routes/forecaster.js
 const express      = require('express');
 const router       = express.Router();
 const auth         = require('../middlewares/auth');
 const ExamForecast = require('../models/ExamForecast');
 const Quiz         = require('../models/Quiz');
+
+// Require the underlying pdf-parse lib directly to avoid the v2 test-fixture issue on Vercel
+let pdfParse;
+try {
+  pdfParse = require('pdf-parse/lib/pdf-parse.js');
+} catch (_) {
+  try { pdfParse = require('pdf-parse'); } catch (_2) {}
+}
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 require('dotenv').config();
@@ -20,67 +28,83 @@ if (GEMINI_KEYS.length > 0) {
       model: 'gemini-2.5-flash',
       generationConfig: { temperature: 0.7, maxOutputTokens: 8192, responseMimeType: 'application/json' },
     });
-  } catch (_) {}
+    console.log('Forecaster AI model: ready');
+  } catch (e) {
+    console.error('Forecaster AI init error:', e.message);
+  }
+}
+
+// Sanitise Gemini patterns to ensure Mongoose types are correct
+function sanitisePatterns(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(p => ({
+      topic:        String(p.topic || '').trim(),
+      frequency:    Number.isFinite(parseInt(p.frequency)) ? parseInt(p.frequency) : 1,
+      confidence:   ['High', 'Medium', 'Low'].includes(p.confidence) ? p.confidence : 'Medium',
+      lastAppeared: String(p.lastAppeared || '').trim(),
+    }))
+    .filter(p => p.topic.length > 0);
 }
 
 // ─── POST /api/forecaster/analyze ─────────────────────────────────────────────
-// Accepts: multipart with up to 5 PDF files + body.examSubject
 router.post('/analyze', auth, async (req, res) => {
   try {
     if (!aiModel)
-      return res.status(503).json({ error: 'AI analysis unavailable. Check your API key configuration.' });
+      return res.status(503).json({ error: 'AI analysis unavailable — check GEMINI_API_KEYS.' });
 
-    const examSubject = req.body?.examSubject?.trim();
+    if (!pdfParse)
+      return res.status(503).json({ error: 'PDF parser unavailable on this server.' });
+
+    const examSubject = (req.body?.examSubject || '').trim();
     if (!examSubject)
       return res.status(400).json({ error: 'Exam subject is required.' });
 
     if (!req.files || Object.keys(req.files).length === 0)
       return res.status(400).json({ error: 'Upload at least one past exam PDF.' });
 
-    const pdfParse = require('pdf-parse');
+    // Normalise to array regardless of how express-fileupload packages it
+    const rawFiles = req.files.pdfs || Object.values(req.files)[0];
+    const fileEntries = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
 
-    const fileEntries = Array.isArray(req.files.pdfs)
-      ? req.files.pdfs
-      : req.files.pdfs
-        ? [req.files.pdfs]
-        : Object.values(req.files);
-
-    const uploadedFiles  = [];
-    const textChunks     = [];
-    let totalExtracted   = 0;
+    const uploadedFiles = [];
+    const textChunks    = [];
 
     for (const file of fileEntries) {
       try {
         const parsed = await pdfParse(file.data);
         const text   = (parsed.text || '').trim();
-        if (!text) continue;
-        const chunk = text.slice(0, 15000); // 15k chars per file cap
-        textChunks.push(`=== File: ${file.name} ===\n${chunk}`);
+        if (!text) {
+          console.warn(`No text extracted from ${file.name}`);
+          continue;
+        }
+        textChunks.push(`=== ${file.name} ===\n${text.slice(0, 15000)}`);
         uploadedFiles.push({ name: file.name, textLength: text.length });
-        totalExtracted += chunk.length;
       } catch (pdfErr) {
-        console.warn(`PDF parse failed for ${file.name}:`, pdfErr.message);
+        console.warn(`pdf-parse failed for ${file.name}: ${pdfErr.message}`);
       }
     }
 
     if (textChunks.length === 0)
-      return res.status(422).json({ error: 'Could not extract text from the uploaded PDFs. Make sure they are text-based (not scanned images).' });
+      return res.status(422).json({
+        error: 'Could not extract text from the uploaded PDFs. Use text-based PDFs (not scanned images). If the file is scanned, copy-paste the text into a .txt file and rename it .pdf, or use the notes field instead.',
+      });
 
-    const combinedText = textChunks.join('\n\n').slice(0, 60000);
+    const combinedText = textChunks.join('\n\n').slice(0, 50000);
 
-    const analysisPrompt = `You are an expert exam analyst. Analyse these past exam papers for ${examSubject}.
+    const analysisPrompt = `You are an expert exam analyst. Analyse these past ${examSubject} exam papers.
 
 ${combinedText}
 
-Task:
-1. Identify the most frequently tested topics
-2. Note how often each topic appears and in which years
-3. Identify question patterns and structures
-4. Flag topics trending upward (increasingly tested in recent years)
+Identify:
+1. Most frequently tested topics (count how many times each appears)
+2. Years each topic appeared
+3. Topics trending up recently
+4. Common question structures
 
-Return ONLY valid JSON:
+Return ONLY valid JSON (no markdown, no code fences):
 {
-  "analysisSummary": "2-3 sentence overall analysis of the exam papers",
+  "analysisSummary": "2-3 sentence summary of exam patterns",
   "patterns": [
     {
       "topic": "Topic name",
@@ -91,31 +115,40 @@ Return ONLY valid JSON:
   ]
 }
 
-Return between 8 and 15 patterns, sorted by frequency descending.`;
+Rules for patterns:
+- frequency MUST be an integer (count of appearances)
+- confidence MUST be exactly "High", "Medium", or "Low"
+- Return 8 to 15 patterns sorted by frequency descending`;
 
-    let patterns = [];
+    let patterns        = [];
     let analysisSummary = '';
 
     try {
       const raw    = await aiModel.generateContent(analysisPrompt);
-      const text   = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
+      const text   = raw.response.text().trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
       const parsed = JSON.parse(text);
-      if (parsed.analysisSummary) analysisSummary = parsed.analysisSummary;
-      if (Array.isArray(parsed.patterns)) patterns = parsed.patterns;
+      if (typeof parsed.analysisSummary === 'string') analysisSummary = parsed.analysisSummary;
+      patterns = sanitisePatterns(parsed.patterns);
     } catch (aiErr) {
-      console.error('AI analysis error:', aiErr.message);
-      return res.status(500).json({ error: 'AI failed to analyse papers. Please try again.' });
+      console.error('Forecaster AI error:', aiErr.message);
+      return res.status(500).json({ error: `AI analysis failed: ${aiErr.message}` });
     }
 
-    const forecast = await ExamForecast.create({
-      userId:          req.user.userId,
-      examSubject,
-      uploadedFiles,
-      combinedText,
-      analysisComplete: true,
-      analysisSummary,
-      patterns,
-    });
+    let forecast;
+    try {
+      forecast = await ExamForecast.create({
+        userId:           req.user.userId,
+        examSubject,
+        uploadedFiles,
+        combinedText,
+        analysisComplete: true,
+        analysisSummary,
+        patterns,
+      });
+    } catch (dbErr) {
+      console.error('ExamForecast.create error:', dbErr.message);
+      return res.status(500).json({ error: `Database error: ${dbErr.message}` });
+    }
 
     res.json({
       success:         true,
@@ -124,9 +157,10 @@ Return between 8 and 15 patterns, sorted by frequency descending.`;
       patterns:        forecast.patterns,
       filesProcessed:  uploadedFiles.length,
     });
+
   } catch (err) {
-    console.error('Analyze error:', err);
-    res.status(500).json({ error: 'Analysis failed. Please try again.' });
+    console.error('Forecaster /analyze unexpected error:', err);
+    res.status(500).json({ error: err.message || 'Analysis failed. Please try again.' });
   }
 });
 
@@ -137,27 +171,19 @@ router.post('/:forecastId/generate-mock-exam', auth, async (req, res) => {
       return res.status(503).json({ error: 'AI generation unavailable.' });
 
     const forecast = await ExamForecast.findOne({ _id: req.params.forecastId, userId: req.user.userId });
-    if (!forecast) return res.status(404).json({ error: 'Forecast not found.' });
+    if (!forecast)  return res.status(404).json({ error: 'Forecast not found.' });
     if (!forecast.analysisComplete)
       return res.status(400).json({ error: 'Analysis not complete. Upload and analyse papers first.' });
 
     const topPatterns = forecast.patterns.slice(0, 8).map(p => p.topic).join(', ');
 
-    const mockPrompt = `You are creating a mock exam for ${forecast.examSubject} based on pattern analysis.
+    const mockPrompt = `Create a mock exam for ${forecast.examSubject} based on these high-frequency topics: ${topPatterns}.
 
-Identified high-frequency topics: ${topPatterns}
-
-Generate a mock exam with:
-- 10 MCQ questions (4 options each, one correct)
+Generate:
+- 10 MCQ (4 options each, one correct answer index 0-3)
 - 5 short-answer/essay questions
 
-Rules:
-- Questions must mirror the pattern and style of real exam questions for ${forecast.examSubject}
-- Prioritize the high-frequency topics identified above
-- Include 1-2 current-affairs-related questions relevant to ${forecast.examSubject}
-- Vary difficulty: ~4 easy, ~4 medium, ~4 hard MCQs; essays should require paragraph-length answers
-
-Return ONLY valid JSON:
+Return ONLY valid JSON (no markdown):
 {
   "questions": [
     {
@@ -178,12 +204,12 @@ Return ONLY valid JSON:
     let generatedQuestions = [];
     try {
       const raw    = await aiModel.generateContent(mockPrompt);
-      const text   = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
+      const text   = raw.response.text().trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
       const parsed = JSON.parse(text);
       if (Array.isArray(parsed.questions)) generatedQuestions = parsed.questions;
     } catch (aiErr) {
       console.error('Mock exam AI error:', aiErr.message);
-      return res.status(500).json({ error: 'AI failed to generate mock exam. Please try again.' });
+      return res.status(500).json({ error: `AI failed to generate mock exam: ${aiErr.message}` });
     }
 
     if (generatedQuestions.length === 0)
@@ -210,10 +236,9 @@ Return ONLY valid JSON:
       };
     });
 
-    const quizTitle = `${forecast.examSubject} — AI Mock Exam`;
     const quiz = await Quiz.create({
       userId:         req.user.userId,
-      title:          quizTitle,
+      title:          `${forecast.examSubject} — AI Mock Exam`,
       subject:        forecast.examSubject,
       difficulty:     'hard',
       timeLimit:      Math.max(30, Math.ceil(quizQuestions.length * 3)),
@@ -229,20 +254,14 @@ Return ONLY valid JSON:
     forecast.updatedAt      = new Date();
     await forecast.save();
 
-    res.json({
-      success:    true,
-      quizId:     quiz._id,
-      quizTitle:  quiz.title,
-      numQuestions: quiz.numQuestions,
-    });
+    res.json({ success: true, quizId: quiz._id, quizTitle: quiz.title, numQuestions: quiz.numQuestions });
   } catch (err) {
-    console.error('Generate mock exam error:', err);
-    res.status(500).json({ error: 'Mock exam generation failed. Please try again.' });
+    console.error('generate-mock-exam error:', err);
+    res.status(500).json({ error: err.message || 'Mock exam generation failed.' });
   }
 });
 
-// ─── POST /api/forecaster/:forecastId/after-attempt ──────────────────────────
-// Call this after the user completes the mock exam with their score
+// ─── POST /api/forecaster/:forecastId/after-attempt ───────────────────────────
 router.post('/:forecastId/after-attempt', auth, async (req, res) => {
   try {
     if (!aiModel)
@@ -257,46 +276,40 @@ router.post('/:forecastId/after-attempt', auth, async (req, res) => {
 
     const topPatterns = forecast.patterns.slice(0, 10).map(p => p.topic).join(', ');
 
-    const forecastPrompt = `You are an expert AI exam forecaster for ${forecast.examSubject}.
+    const forecastPrompt = `You are an AI exam forecaster for ${forecast.examSubject}.
+Student's mock score: ${score ?? 'unknown'}%
+High-frequency past-paper topics: ${topPatterns}
+Analysis: ${forecast.analysisSummary}
 
-Student's mock exam score: ${score ?? 'unknown'}%
-High-frequency topics identified from past papers: ${topPatterns}
-Analysis summary: ${forecast.analysisSummary}
+Predict which topics are MOST LIKELY on the real exam and give preparation advice.
 
-Based on the pattern analysis and the student's performance:
-1. Predict which topics are MOST LIKELY to appear on the actual upcoming exam
-2. Give specific preparation advice for last-minute study
-
-Return ONLY valid JSON:
+Return ONLY valid JSON (no markdown):
 {
   "forecastedTopics": [
-    {
-      "topic": "Topic name",
-      "likelihood": 85,
-      "reason": "Reason this is likely to appear",
-      "confidence": "High"
-    }
+    { "topic": "Topic name", "likelihood": 85, "reason": "Reason", "confidence": "High" }
   ],
-  "preparationAdvice": [
-    "Specific advice 1",
-    "Specific advice 2",
-    "Specific advice 3"
-  ]
+  "preparationAdvice": ["Advice 1", "Advice 2", "Advice 3"]
 }
 
-Return 5-8 forecasted topics sorted by likelihood descending. Confidence must be High, Medium, or Low.`;
+Rules: likelihood is an integer 0-100, confidence is exactly "High", "Medium", or "Low".
+Return 5-8 topics sorted by likelihood descending.`;
 
-    let forecastedTopics   = [];
-    let preparationAdvice  = [];
+    let forecastedTopics  = [];
+    let preparationAdvice = [];
 
     try {
       const raw    = await aiModel.generateContent(forecastPrompt);
-      const text   = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
+      const text   = raw.response.text().trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
       const parsed = JSON.parse(text);
-      if (Array.isArray(parsed.forecastedTopics)) forecastedTopics  = parsed.forecastedTopics;
-      if (Array.isArray(parsed.preparationAdvice)) preparationAdvice = parsed.preparationAdvice;
+      if (Array.isArray(parsed.forecastedTopics))  forecastedTopics  = parsed.forecastedTopics.map(t => ({
+        topic:      String(t.topic || ''),
+        likelihood: Number.isFinite(parseInt(t.likelihood)) ? parseInt(t.likelihood) : 50,
+        reason:     String(t.reason || ''),
+        confidence: ['High', 'Medium', 'Low'].includes(t.confidence) ? t.confidence : 'Medium',
+      }));
+      if (Array.isArray(parsed.preparationAdvice)) preparationAdvice = parsed.preparationAdvice.map(String);
     } catch (aiErr) {
-      console.error('Forecast AI error:', aiErr.message);
+      console.error('after-attempt AI error:', aiErr.message);
     }
 
     forecast.forecastedTopics  = forecastedTopics;
@@ -306,8 +319,8 @@ Return 5-8 forecasted topics sorted by likelihood descending. Confidence must be
 
     res.json({ success: true, forecastedTopics, preparationAdvice });
   } catch (err) {
-    console.error('After-attempt error:', err);
-    res.status(500).json({ error: 'Failed to generate forecast. Please try again.' });
+    console.error('after-attempt error:', err);
+    res.status(500).json({ error: err.message || 'Failed to generate forecast.' });
   }
 });
 
@@ -321,7 +334,7 @@ router.get('/my-forecasts', auth, async (req, res) => {
       .lean();
     res.json({ success: true, forecasts });
   } catch (err) {
-    console.error('Get forecasts error:', err);
+    console.error('my-forecasts error:', err);
     res.status(500).json({ error: 'Failed to fetch forecasts' });
   }
 });
@@ -336,7 +349,7 @@ router.get('/:forecastId', auth, async (req, res) => {
     if (!forecast) return res.status(404).json({ error: 'Forecast not found.' });
     res.json({ success: true, forecast });
   } catch (err) {
-    console.error('Get forecast error:', err);
+    console.error('get-forecast error:', err);
     res.status(500).json({ error: 'Failed to fetch forecast' });
   }
 });
