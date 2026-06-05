@@ -1,10 +1,10 @@
 // routes/studyplanner.js
-const express  = require('express');
-const router   = express.Router();
-const auth     = require('../middlewares/auth');
-const StudyPlan     = require('../models/StudyPlan');
-const Quiz          = require('../models/Quiz');
-const FlashcardSet  = require('../models/FlashcardSet');
+const express   = require('express');
+const router    = express.Router();
+const auth      = require('../middlewares/auth');
+const StudyPlan = require('../models/StudyPlan');
+const Quiz      = require('../models/Quiz');
+const QuizResult = require('../models/QuizResult');
 
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 require('dotenv').config();
@@ -19,138 +19,223 @@ if (GEMINI_KEYS.length > 0) {
     const genAI = new GoogleGenerativeAI(GEMINI_KEYS[0]);
     aiModel = genAI.getGenerativeModel({
       model: 'gemini-2.5-flash',
-      generationConfig: { temperature: 0.7, maxOutputTokens: 4096, responseMimeType: 'application/json' },
+      generationConfig: { temperature: 0.7, maxOutputTokens: 8192, responseMimeType: 'application/json' },
     });
   } catch (_) {}
 }
 
-// ─── POST /api/study-planner/create-exam ──────────────────────────────────────
-// Body: { examName: string, papers: [{ date: ISO, subject: string }] }
-router.post('/create-exam', auth, async (req, res) => {
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function addDays(date, n) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + n);
+  return d;
+}
+
+function formatDate(date) {
+  return new Date(date).toISOString().split('T')[0];
+}
+
+// Fallback deterministic schedule when AI is unavailable
+function buildFallbackSchedule(subjects, examDate, dailyHours) {
+  const sessions = [];
+  const today    = new Date();
+  today.setHours(0, 0, 0, 0);
+  const exam     = new Date(examDate);
+  exam.setHours(0, 0, 0, 0);
+  const days     = Math.max(1, Math.ceil((exam - today) / 86400000) - 1);
+
+  const sessionsPerDay  = Math.max(1, Math.round(dailyHours / 1.5));
+  const durationPerSession = Math.round((dailyHours * 60) / sessionsPerDay);
+  let subjectIdx = 0;
+
+  for (let d = 0; d < days; d++) {
+    const date = addDays(today, d + 1);
+    for (let s = 0; s < sessionsPerDay; s++) {
+      const subject = subjects[subjectIdx % subjects.length];
+      const isLast3Days = d >= days - 3;
+      sessions.push({
+        date,
+        subject,
+        durationMinutes: durationPerSession,
+        sessionType: isLast3Days ? 'review' : 'quiz',
+        priority:    isLast3Days ? 'high' : 'medium',
+        notes: isLast3Days ? 'Final revision — focus on weak points' : '',
+      });
+      subjectIdx++;
+    }
+  }
+  return sessions;
+}
+
+// ─── POST /api/study-planner/create ───────────────────────────────────────────
+router.post('/create', auth, async (req, res) => {
   try {
-    const { examName, papers } = req.body;
+    const { examName, examDate, subjects, dailyStudyHours } = req.body;
     if (!examName?.trim())
-      return res.status(400).json({ error: 'examName is required' });
-    if (!Array.isArray(papers) || papers.length === 0)
-      return res.status(400).json({ error: 'At least one paper is required' });
-
-    const validPapers = papers
-      .filter(p => p.subject?.trim() && p.date)
-      .map(p => ({
-        date:       new Date(p.date),
-        subject:    p.subject.trim(),
-        notes:      '',
-        hasContent: false,
-        generated:  false,
-      }));
-
-    if (validPapers.length === 0)
-      return res.status(400).json({ error: 'Each paper must have a subject and date' });
+      return res.status(400).json({ error: 'Exam name is required' });
+    if (!examDate)
+      return res.status(400).json({ error: 'Exam date is required' });
+    if (!Array.isArray(subjects) || subjects.filter(Boolean).length === 0)
+      return res.status(400).json({ error: 'At least one subject is required' });
+    if (new Date(examDate) <= new Date())
+      return res.status(400).json({ error: 'Exam date must be in the future' });
 
     const plan = await StudyPlan.create({
-      userId:   req.user.userId,
-      examName: examName.trim(),
-      papers:   validPapers,
+      userId:          req.user.userId,
+      examName:        examName.trim(),
+      examDate:        new Date(examDate),
+      subjects:        subjects.filter(s => s?.trim()).map(s => s.trim()),
+      dailyStudyHours: Math.min(12, Math.max(0.5, parseFloat(dailyStudyHours) || 2)),
     });
 
     res.json({ success: true, plan });
   } catch (err) {
-    console.error('Create exam plan error:', err);
-    res.status(500).json({ error: 'Failed to create exam plan' });
+    console.error('Create plan error:', err);
+    res.status(500).json({ error: 'Failed to create study plan' });
   }
 });
 
-// ─── POST /api/study-planner/plan/:planId/paper/:paperId/material ─────────────
-// Accepts either: multipart with file "pdf", OR JSON body { notes: "..." }
-router.post('/plan/:planId/paper/:paperId/material', auth, async (req, res) => {
+// ─── POST /api/study-planner/:planId/generate-schedule ────────────────────────
+router.post('/:planId/generate-schedule', auth, async (req, res) => {
   try {
     const plan = await StudyPlan.findOne({ _id: req.params.planId, userId: req.user.userId });
     if (!plan) return res.status(404).json({ error: 'Plan not found' });
 
-    const paper = plan.papers.id(req.params.paperId);
-    if (!paper) return res.status(404).json({ error: 'Paper not found' });
+    const today     = new Date();
+    today.setHours(0, 0, 0, 0);
+    const examDate  = new Date(plan.examDate);
+    const daysLeft  = Math.max(1, Math.ceil((examDate - today) / 86400000) - 1);
+    const subjects  = plan.subjects;
 
-    let extractedText = '';
-    let fileName      = '';
+    // Fetch user's weak subjects from quiz history
+    const results   = await QuizResult.find({ userId: req.user.userId }).lean();
+    const bySubject = {};
+    results.forEach(r => {
+      if (!bySubject[r.subject]) bySubject[r.subject] = [];
+      bySubject[r.subject].push(r.score);
+    });
+    const weakSubjects = subjects.filter(s => {
+      const scores = bySubject[s];
+      if (!scores || scores.length === 0) return false;
+      const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+      return avg < 60;
+    });
 
-    // ── PDF upload ──────────────────────────────────────────────────────────
-    if (req.files?.pdf) {
+    let sessions = [];
+
+    if (aiModel) {
+      const today_str = formatDate(today);
+      const exam_str  = formatDate(examDate);
+
+      const prompt = `You are an expert study planner. Create a daily study schedule.
+
+Exam: "${plan.examName}"
+Exam Date: ${exam_str}
+Today: ${today_str}
+Days Available: ${daysLeft}
+Subjects to Cover: ${subjects.join(', ')}
+Daily Study Hours: ${plan.dailyStudyHours}
+Subjects needing extra focus (weak): ${weakSubjects.length > 0 ? weakSubjects.join(', ') : 'None identified yet'}
+
+Rules:
+- Create sessions from tomorrow (${formatDate(addDays(today, 1))}) through ${formatDate(addDays(examDate, -1))}
+- Each day has ${Math.max(1, Math.round(plan.dailyStudyHours / 1.5))} session(s)
+- Each session is ${Math.round((plan.dailyStudyHours * 60) / Math.max(1, Math.round(plan.dailyStudyHours / 1.5)))} minutes
+- Weak subjects get ~30% more sessions than strong ones
+- Last 3 days before exam: only "review" sessionType, priority "high"
+- Do not repeat the same subject more than 2 consecutive days
+- Cover ALL subjects at least once
+
+Return ONLY valid JSON with no markdown:
+{
+  "sessions": [
+    {
+      "date": "YYYY-MM-DD",
+      "subject": "Subject Name",
+      "durationMinutes": 60,
+      "sessionType": "quiz",
+      "priority": "medium",
+      "notes": "Optional focus note"
+    }
+  ]
+}`;
+
       try {
-        const pdfParse = require('pdf-parse');
-        const buffer   = req.files.pdf.data;
-        const parsed   = await pdfParse(buffer);
-        extractedText  = (parsed.text || '').trim();
-        fileName       = req.files.pdf.name || 'document.pdf';
-
-        if (!extractedText) {
-          return res.status(422).json({ error: 'Could not extract text from PDF. Try pasting notes instead.' });
+        const raw  = await aiModel.generateContent(prompt);
+        const text = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
+        const parsed = JSON.parse(text);
+        if (Array.isArray(parsed.sessions) && parsed.sessions.length > 0) {
+          sessions = parsed.sessions.map(s => ({
+            date:            new Date(s.date),
+            subject:         s.subject,
+            durationMinutes: parseInt(s.durationMinutes) || 60,
+            sessionType:     ['quiz','review','practice'].includes(s.sessionType) ? s.sessionType : 'quiz',
+            priority:        ['high','medium','low'].includes(s.priority) ? s.priority : 'medium',
+            notes:           s.notes || '',
+          })).filter(s => !isNaN(s.date.getTime()) && subjects.includes(s.subject));
         }
-      } catch (pdfErr) {
-        console.error('PDF parse error:', pdfErr.message);
-        return res.status(422).json({ error: 'PDF parsing failed. Try pasting notes as text.' });
+      } catch (aiErr) {
+        console.error('AI schedule error:', aiErr.message);
       }
     }
 
-    // ── Pasted notes ────────────────────────────────────────────────────────
-    else if (req.body?.notes?.trim()) {
-      extractedText = req.body.notes.trim();
-      fileName      = '';
-    } else {
-      return res.status(400).json({ error: 'Send a PDF file or paste notes text' });
+    // Fallback if AI failed or returned empty
+    if (sessions.length === 0) {
+      sessions = buildFallbackSchedule(subjects, plan.examDate, plan.dailyStudyHours);
     }
 
-    paper.notes      = extractedText.slice(0, 50000); // cap at 50k chars
-    paper.fileName   = fileName;
-    paper.hasContent = true;
-    plan.updatedAt   = new Date();
+    plan.schedule  = sessions;
+    plan.generated = true;
+    plan.updatedAt = new Date();
     await plan.save();
 
-    res.json({
-      success:   true,
-      paperId:   paper._id,
-      fileName:  paper.fileName,
-      textLength: paper.notes.length,
-    });
+    res.json({ success: true, plan });
   } catch (err) {
-    console.error('Upload material error:', err);
-    res.status(500).json({ error: 'Failed to save material' });
+    console.error('Generate schedule error:', err);
+    res.status(500).json({ error: 'Failed to generate schedule' });
   }
 });
 
-// ─── POST /api/study-planner/plan/:planId/paper/:paperId/generate ─────────────
-// AI generates quiz + flashcards from paper.notes
-router.post('/plan/:planId/paper/:paperId/generate', auth, async (req, res) => {
+// ─── POST /api/study-planner/:planId/session/:sessionId/start ─────────────────
+// Generates (or retrieves) a quiz for this session and returns its ID
+router.post('/:planId/session/:sessionId/start', auth, async (req, res) => {
   try {
-    if (!aiModel)
-      return res.status(503).json({ error: 'AI generation is unavailable. Check your API key configuration.' });
-
     const plan = await StudyPlan.findOne({ _id: req.params.planId, userId: req.user.userId });
     if (!plan) return res.status(404).json({ error: 'Plan not found' });
 
-    const paper = plan.papers.id(req.params.paperId);
-    if (!paper) return res.status(404).json({ error: 'Paper not found' });
+    const session = plan.schedule.id(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
 
-    if (!paper.hasContent || !paper.notes?.trim())
-      return res.status(400).json({ error: 'Upload material for this paper first' });
+    // Return existing quiz if already generated
+    if (session.quizId) {
+      return res.json({ success: true, quizId: session.quizId, quizTitle: session.quizTitle });
+    }
 
-    // Truncate notes for Gemini (keep it fast and within limits)
-    const material   = paper.notes.slice(0, 7000);
-    const subject    = paper.subject;
-    const examDate   = new Date(paper.date).toDateString();
+    if (!aiModel)
+      return res.status(503).json({ error: 'AI generation unavailable. Check API key configuration.' });
 
-    // ── Generate quiz questions ─────────────────────────────────────────────
+    const examDate   = new Date(plan.examDate).toDateString();
+    const sessionType = session.sessionType;
+    const subject    = session.subject;
+    const priority   = session.priority;
+
     const quizPrompt = `You are an expert exam question creator for ${subject}.
-Based on the study material below, generate 12 high-quality exam questions:
-- 8 MCQ questions (exactly 4 options each, one correct)
-- 4 short-answer/essay questions
+Generate ${sessionType === 'review' ? 8 : 10} MCQ questions and ${sessionType === 'review' ? 3 : 4} short-answer questions for a study session.
+
+Context:
+- Subject: ${subject}
+- Exam: ${plan.examName} (${examDate})
+- Session type: ${sessionType}
+- Priority: ${priority} ${priority === 'high' ? '— focus on difficult/commonly examined topics' : ''}
 
 Rules:
-- Questions must be directly based on the material (not generic)
-- MCQ options must be plausible (avoid obviously wrong distractors)
-- Essay model answers should be 2–4 sentences
-- Match difficulty to an actual exam paper
+- Questions must test real subject knowledge (not trivial)
+- MCQ: exactly 4 options, one correct answer
+- Short-answer: 2–4 sentence model answers
+- Match difficulty to an actual exam paper for this subject
 
-Return ONLY valid JSON (no markdown, no code blocks):
+Return ONLY valid JSON:
 {
   "questions": [
     {
@@ -166,74 +251,34 @@ Return ONLY valid JSON (no markdown, no code blocks):
       "modelAnswer": "..."
     }
   ]
-}
-
-Study Material for ${subject} (Exam: ${examDate}):
-${material}`;
-
-    // ── Generate flashcards ─────────────────────────────────────────────────
-    const flashPrompt = `You are creating revision flashcards for a ${subject} exam.
-Based on the study material below, generate 18 concise flashcard pairs covering:
-- Key definitions and terms
-- Important formulas or dates
-- Core concepts and theories
-- Common exam topics
-
-Each card: front = question/prompt, back = concise answer (1–3 sentences max).
-
-Return ONLY valid JSON:
-{
-  "cards": [
-    { "question": "Define [term]...", "answer": "..." }
-  ]
-}
-
-Study Material:
-${material}`;
+}`;
 
     let generatedQuestions = [];
-    let generatedCards     = [];
-
     try {
-      const [quizRaw, flashRaw] = await Promise.all([
-        aiModel.generateContent(quizPrompt),
-        aiModel.generateContent(flashPrompt),
-      ]);
-
-      const quizText  = quizRaw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
-      const flashText = flashRaw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
-
-      const quizParsed  = JSON.parse(quizText);
-      const flashParsed = JSON.parse(flashText);
-
-      if (Array.isArray(quizParsed.questions))  generatedQuestions = quizParsed.questions;
-      if (Array.isArray(flashParsed.cards))      generatedCards     = flashParsed.cards;
+      const raw   = await aiModel.generateContent(quizPrompt);
+      const text  = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed.questions)) generatedQuestions = parsed.questions;
     } catch (aiErr) {
-      console.error('AI generation error:', aiErr.message);
-      return res.status(500).json({ error: 'AI failed to generate content. Please try again.' });
+      console.error('AI quiz error:', aiErr.message);
+      return res.status(500).json({ error: 'AI failed to generate quiz. Please try again.' });
     }
 
     if (generatedQuestions.length === 0)
       return res.status(500).json({ error: 'AI returned no questions. Please try again.' });
 
-    // ── Build quiz document ─────────────────────────────────────────────────
-    const quizTitle = `${subject} — ${plan.examName} Exam Practice`;
-
-    const mcqQuestions   = generatedQuestions.filter(q => q.type === 'mcq');
-    const essayQuestions = generatedQuestions.filter(q => q.type === 'essay');
-    const questionType   = mcqQuestions.length > 0 && essayQuestions.length > 0
-      ? 'mixed' : mcqQuestions.length > 0 ? 'mcq' : 'essay';
+    const mcq   = generatedQuestions.filter(q => q.type === 'mcq');
+    const essay = generatedQuestions.filter(q => q.type === 'essay');
+    const questionType = mcq.length > 0 && essay.length > 0 ? 'mixed' : mcq.length > 0 ? 'mcq' : 'essay';
 
     const quizQuestions = generatedQuestions.map(q => {
-      if (q.type === 'mcq') {
-        return {
-          question:      q.question,
-          options:       Array.isArray(q.options) ? q.options.slice(0, 4) : [],
-          correctAnswer: typeof q.correctAnswer === 'number' ? q.correctAnswer : 0,
-          modelAnswer:   '',
-          explanation:   q.explanation || '',
-        };
-      }
+      if (q.type === 'mcq') return {
+        question:      q.question,
+        options:       Array.isArray(q.options) ? q.options.slice(0, 4) : [],
+        correctAnswer: typeof q.correctAnswer === 'number' ? q.correctAnswer : 0,
+        modelAnswer:   '',
+        explanation:   q.explanation || '',
+      };
       return {
         question:      q.question,
         options:       [],
@@ -243,79 +288,89 @@ ${material}`;
       };
     });
 
+    const quizTitle = `${subject} — ${plan.examName} (${sessionType === 'review' ? 'Revision' : 'Practice'})`;
     const quiz = await Quiz.create({
-      userId:       req.user.userId,
-      title:        quizTitle,
-      subject:      subject,
-      difficulty:   'hard',
-      timeLimit:    Math.max(20, Math.ceil(quizQuestions.length * 2.5)),
-      numQuestions: quizQuestions.length,
+      userId:         req.user.userId,
+      title:          quizTitle,
+      subject,
+      difficulty:     priority === 'high' ? 'hard' : 'medium',
+      timeLimit:      Math.max(15, Math.ceil(quizQuestions.length * 2.5)),
+      numQuestions:   quizQuestions.length,
       questionType,
-      questions:    quizQuestions,
-      isPublic:     false,
+      questions:      quizQuestions,
+      isPublic:       false,
       isAdminCreated: false,
     });
 
-    // ── Build flashcard set ─────────────────────────────────────────────────
-    const flashTitle = `${subject} — ${plan.examName} Flashcards`;
-
-    const cards = generatedCards
-      .filter(c => c.question?.trim() && c.answer?.trim())
-      .map(c => ({ question: c.question.trim(), answer: c.answer.trim(), masteryLevel: 0 }));
-
-    let flashcardSetId   = null;
-    let flashcardTitle   = flashTitle;
-
-    if (cards.length > 0) {
-      const set = await FlashcardSet.create({
-        userId:        req.user.userId,
-        title:         flashTitle,
-        subject:       subject,
-        cards,
-        isPublic:      false,
-        isAdminCreated: false,
-      });
-      flashcardSetId = set._id;
-      flashcardTitle = set.title;
-    }
-
-    // ── Update paper record ─────────────────────────────────────────────────
-    paper.generated      = true;
-    paper.quizId         = quiz._id;
-    paper.quizTitle      = quiz.title;
-    paper.flashcardSetId = flashcardSetId;
-    paper.flashcardTitle = flashcardTitle;
-    plan.updatedAt       = new Date();
+    session.quizId    = quiz._id;
+    session.quizTitle = quiz.title;
+    plan.updatedAt    = new Date();
     await plan.save();
 
-    res.json({
-      success:         true,
-      quizId:          quiz._id,
-      quizTitle:       quiz.title,
-      numQuestions:    quiz.numQuestions,
-      flashcardSetId,
-      flashcardTitle,
-      numCards:        cards.length,
-    });
+    res.json({ success: true, quizId: quiz._id, quizTitle: quiz.title });
   } catch (err) {
-    console.error('Generate content error:', err);
-    res.status(500).json({ error: 'Generation failed. Please try again.' });
+    console.error('Start session error:', err);
+    res.status(500).json({ error: 'Failed to start session' });
+  }
+});
+
+// ─── POST /api/study-planner/:planId/session/:sessionId/complete ───────────────
+router.post('/:planId/session/:sessionId/complete', auth, async (req, res) => {
+  try {
+    const { score } = req.body;
+    const plan = await StudyPlan.findOne({ _id: req.params.planId, userId: req.user.userId });
+    if (!plan) return res.status(404).json({ error: 'Plan not found' });
+
+    const session = plan.schedule.id(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    session.completed   = true;
+    session.completedAt = new Date();
+    if (typeof score === 'number') session.score = score;
+    plan.updatedAt = new Date();
+    await plan.save();
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Complete session error:', err);
+    res.status(500).json({ error: 'Failed to mark session complete' });
+  }
+});
+
+// ─── PATCH /api/study-planner/:planId/session/:sessionId ──────────────────────
+router.patch('/:planId/session/:sessionId', auth, async (req, res) => {
+  try {
+    const { date, durationMinutes, notes } = req.body;
+    const plan = await StudyPlan.findOne({ _id: req.params.planId, userId: req.user.userId });
+    if (!plan) return res.status(404).json({ error: 'Plan not found' });
+
+    const session = plan.schedule.id(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    if (date)            session.date            = new Date(date);
+    if (durationMinutes) session.durationMinutes = parseInt(durationMinutes);
+    if (notes !== undefined) session.notes       = notes;
+    plan.updatedAt = new Date();
+    await plan.save();
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Update session error:', err);
+    res.status(500).json({ error: 'Failed to update session' });
   }
 });
 
 // ─── GET /api/study-planner/plans ─────────────────────────────────────────────
 router.get('/plans', auth, async (req, res) => {
   try {
-    const plans = await StudyPlan.find({ userId: req.user.userId })
-      .sort({ createdAt: -1 }).lean();
-
-    const enriched = plans.map(p => ({
-      ...p,
-      totalPapers:     p.papers.length,
-      generatedPapers: p.papers.filter(x => x.generated).length,
-      nextExamDate:    p.papers.sort((a, b) => new Date(a.date) - new Date(b.date))[0]?.date || null,
-    }));
-
+    const plans = await StudyPlan.find({ userId: req.user.userId }).sort({ createdAt: -1 }).lean();
+    const enriched = plans.map(p => {
+      const total     = p.schedule.length;
+      const completed = p.schedule.filter(s => s.completed).length;
+      const today     = new Date();
+      const daysLeft  = Math.max(0, Math.ceil((new Date(p.examDate) - today) / 86400000));
+      return { ...p, total, completed, daysLeft, progress: total > 0 ? Math.round((completed / total) * 100) : 0 };
+    });
     res.json({ success: true, plans: enriched });
   } catch (err) {
     console.error('Get plans error:', err);
@@ -323,18 +378,28 @@ router.get('/plans', auth, async (req, res) => {
   }
 });
 
-// ─── GET /api/study-planner/plan/:id ──────────────────────────────────────────
-router.get('/plan/:id', auth, async (req, res) => {
+// ─── GET /api/study-planner/:planId ───────────────────────────────────────────
+router.get('/:planId', auth, async (req, res) => {
   try {
-    const plan = await StudyPlan.findOne({ _id: req.params.id, userId: req.user.userId }).lean();
+    const plan = await StudyPlan.findOne({ _id: req.params.planId, userId: req.user.userId }).lean();
     if (!plan) return res.status(404).json({ error: 'Plan not found' });
+
+    const today    = new Date();
+    const daysLeft = Math.max(0, Math.ceil((new Date(plan.examDate) - today) / 86400000));
+    const total    = plan.schedule.length;
+    const completed = plan.schedule.filter(s => s.completed).length;
 
     const enriched = {
       ...plan,
-      papers: plan.papers
-        .map(p => ({
-          ...p,
-          daysUntilExam: Math.max(0, Math.ceil((new Date(p.date) - new Date()) / (1000 * 60 * 60 * 24))),
+      daysLeft,
+      total,
+      completed,
+      progress: total > 0 ? Math.round((completed / total) * 100) : 0,
+      schedule: plan.schedule
+        .map(s => ({
+          ...s,
+          isPast:   new Date(s.date) < today && !s.completed,
+          isToday:  new Date(s.date).toDateString() === today.toDateString(),
         }))
         .sort((a, b) => new Date(a.date) - new Date(b.date)),
     };
@@ -346,10 +411,10 @@ router.get('/plan/:id', auth, async (req, res) => {
   }
 });
 
-// ─── DELETE /api/study-planner/plan/:id ───────────────────────────────────────
-router.delete('/plan/:id', auth, async (req, res) => {
+// ─── DELETE /api/study-planner/:planId ────────────────────────────────────────
+router.delete('/:planId', auth, async (req, res) => {
   try {
-    await StudyPlan.deleteOne({ _id: req.params.id, userId: req.user.userId });
+    await StudyPlan.deleteOne({ _id: req.params.planId, userId: req.user.userId });
     res.json({ success: true });
   } catch (err) {
     console.error('Delete plan error:', err);

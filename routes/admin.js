@@ -983,4 +983,36 @@ router.get("/operations/health", async (req, res) => {
   }
 });
 
+// ==================== CONTACT MESSAGES ====================
+const ContactMessage = require('../models/ContactMessage');
+
+router.get('/contact-messages', async (req, res) => {
+  try {
+    const messages = await ContactMessage.find().sort({ createdAt: -1 }).lean();
+    const unread   = messages.filter(m => !m.read).length;
+    res.json({ success: true, messages, unread });
+  } catch (err) {
+    console.error('Contact messages error:', err);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
+router.patch('/contact-messages/:id/read', async (req, res) => {
+  try {
+    await ContactMessage.findByIdAndUpdate(req.params.id, { read: true });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to mark as read' });
+  }
+});
+
+router.delete('/contact-messages/:id', async (req, res) => {
+  try {
+    await ContactMessage.findByIdAndDelete(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete message' });
+  }
+});
+
 module.exports = router;

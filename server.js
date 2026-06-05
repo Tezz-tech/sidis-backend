@@ -10,6 +10,10 @@ let gamificationRoutes = null;
 try { gamificationRoutes = require('./routes/gamification'); } catch (_) {}
 let studyPlannerRoutes = null;
 try { studyPlannerRoutes = require('./routes/studyplanner'); } catch (_) {}
+let forecasterRoutes = null;
+try { forecasterRoutes = require('./routes/forecaster'); } catch (_) {}
+let supportRoutes = null;
+try { supportRoutes = require('./routes/support'); } catch (_) {}
 const fileUpload = require('express-fileupload');
 const cors = require('cors');
 require('dotenv').config();
@@ -80,6 +84,8 @@ if (!adminRouter || (typeof adminRouter !== 'function' && typeof adminRouter !==
 app.use('/api/flashcards', flashcardRoutes);
 if (gamificationRoutes)  app.use('/api/gamification',  gamificationRoutes);
 if (studyPlannerRoutes)  app.use('/api/study-planner', studyPlannerRoutes);
+if (forecasterRoutes)    app.use('/api/forecaster',    forecasterRoutes);
+if (supportRoutes)       app.use('/api/support',       supportRoutes);
 
 // -------------------------------------------------
 // 5. Global error handler (still sends CORS headers)
