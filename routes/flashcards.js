@@ -6,80 +6,11 @@ const FlashcardSet = require("../models/FlashcardSet");
 const PDFParser = require("pdf2json");
 require("dotenv").config();
 
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-
-// ==================== GEMINI API KEYS ====================
-const GEMINI_API_KEYS = process.env.GEMINI_API_KEYS
-  ? process.env.GEMINI_API_KEYS.split(",").map(k => k.trim()).filter(Boolean)
-  : [];
-
-if (GEMINI_API_KEYS.length === 0) {
-  console.error("GEMINI_API_KEYS not set in .env");
-  process.exit(1);
-}
-
-// ==================== MODEL NAMES (Latest Nov 2025) ====================
-const PRIMARY_MODEL = "gemini-2.5-flash";
-const FALLBACK_MODEL = "gemini-2.5-pro";
-
-// ==================== AI MANAGER (Same as Quiz Route) ====================
-class AIManager {
-  constructor(keys) {
-    this.keys = keys;
-    this.currentIdx = 0;
-    this.models = new Map();
-    this.initCurrentModel();
-  }
-
-  _getModel(key, modelName) {
-    const genAI = new GoogleGenerativeAI(key);
-    return genAI.getGenerativeModel({
-      model: modelName,
-      generationConfig: {
-        temperature: 0.7,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 8192,
-        responseMimeType: "application/json",
-      },
-    });
-  }
-
-  initCurrentModel() {
-    const key = this.keys[this.currentIdx];
-    try {
-      const model = this._getModel(key, PRIMARY_MODEL);
-      this.models.set(this.currentIdx, model);
-      console.log(`Flashcard AI Ready → Key #${this.currentIdx + 1} → ${PRIMARY_MODEL}`);
-    } catch (e) {
-      console.warn(`Primary model failed. Trying fallback for key #${this.currentIdx + 1}`);
-      this.models.set(this.currentIdx, this._getModel(key, FALLBACK_MODEL));
-    }
-  }
-
-  getCurrentModel() {
-    return this.models.get(this.currentIdx) ?? null;
-  }
-
-  async rotateIfNeeded(error) {
-    if (this.keys.length <= 1) return null;
-    const isRateLimit = error?.status === 429 || /quota|rate limit|429/i.test(error?.message || "");
-    if (!isRateLimit) return null;
-
-    console.warn(`Rate limit hit. Rotating key #${this.currentIdx + 1} → #${(this.currentIdx + 1) % this.keys.length + 1}`);
-    this.currentIdx = (this.currentIdx + 1) % this.keys.length;
-    this.initCurrentModel();
-    return this.getCurrentModel();
-  }
-}
-
-const aiManager = new AIManager(GEMINI_API_KEYS);
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+const { gemini, capText } = require("../utils/ai");
 
 // ==================== GENERATE FLASHCARDS (PDF OR TEXT) ====================
 router.post("/generate-flashcards", auth, async (req, res) => {
-  let model = aiManager.getCurrentModel();
-  if (!model) return res.status(500).json({ error: "AI service unavailable" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
 
   try {
     const { title, subject, content } = req.body;
@@ -124,78 +55,39 @@ router.post("/generate-flashcards", auth, async (req, res) => {
       return res.status(400).json({ error: "No readable text found in your input" });
     }
 
-    const safeText = extractedText.slice(0, 30_000);
+    const safeText = capText(extractedText, 30000);
 
-    const prompt = `
-You are an expert flashcard creator. Generate 12 high-quality flashcards from this content.
-
+    const prompt = `You are an expert flashcard creator. Generate 12 high-quality flashcards from this content.
 Subject: ${subject || "General"}
-Output ONLY a valid JSON array. No explanations.
-
-Format:
-[
-  {"question": "What is photosynthesis?", "answer": "Process by which plants convert sunlight into energy"},
-  ...
-]
-
+Return ONLY a valid JSON array, no markdown:
+[{"question":"...","answer":"..."},...]
 Content:
-${safeText}
-    `.trim();
-
-    let rawResponse = "";
-    let attempts = 0;
-
-    while (attempts < 6) {
-      try {
-        const result = await model.generateContent(prompt);
-        rawResponse = result.response.text().trim();
-        if (rawResponse) break;
-      } catch (err) {
-        attempts++;
-        console.warn(`Flashcard AI attempt ${attempts} failed:`, err.message);
-
-        if (err.message.includes("404") || attempts === 1) {
-          model = aiManager._getModel(aiManager.keys[aiManager.currentIdx], FALLBACK_MODEL);
-          await sleep(2000);
-          continue;
-        }
-
-        const rotated = await aiManager.rotateIfNeeded(err);
-        if (rotated) {
-          model = rotated;
-          attempts = 0;
-          await sleep(2000);
-        } else if (err.status >= 500 || err.status === 429) {
-          await sleep(2000 * attempts);
-        } else {
-          break;
-        }
-      }
-    }
-
-    if (!rawResponse) {
-      return res.status(500).json({ error: "AI failed to generate flashcards after multiple attempts" });
-    }
+${safeText}`.trim();
 
     let cards;
     try {
-      const cleaned = rawResponse.replace(/^```json\s*|```$/gi, "").trim();
-      cards = JSON.parse(cleaned);
-
-      if (!Array.isArray(cards) || cards.length === 0) {
-        throw new Error("Empty or invalid response");
-      }
-
-      cards = cards.map(c => ({
-        question: (c.question || "").trim(),
-        answer: (c.answer || "").trim(),
-      })).filter(c => c.question && c.answer);
-
-      if (cards.length === 0) throw new Error("No valid cards generated");
-    } catch (e) {
-      console.log("Raw AI response:", rawResponse.slice(0, 500));
-      return res.status(500).json({ error: "AI returned invalid flashcard format" });
+      const parsed = await gemini.generateJSON(prompt);
+      cards = Array.isArray(parsed) ? parsed : parsed?.cards || parsed?.flashcards || [];
+      if (cards.length === 0) throw new Error("Empty card array");
+    } catch (aiErr) {
+      console.error("Flashcard AI error:", aiErr.message);
+      return res.status(500).json({ error: `AI error: ${aiErr.message}` });
     }
+
+    if (!Array.isArray(cards) || cards.length === 0) {
+      return res.status(500).json({ error: "AI returned no flashcards. Try again." });
+    }
+
+    {  // keep scope for existing code below
+
+    cards = cards
+      .map(c => ({ question: (c.question || "").trim(), answer: (c.answer || "").trim() }))
+      .filter(c => c.question && c.answer);
+
+    if (cards.length === 0)
+      return res.status(500).json({ error: "AI returned no valid flashcards. Try again." });
+
+    }  // end scope
 
     const flashcardSet = new FlashcardSet({
       userId: req.user.userId,

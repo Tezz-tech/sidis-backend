@@ -12,96 +12,9 @@ require("dotenv").config();
 let awardXP = null;
 try { ({ awardXP } = require("../utils/gamificationUtils")); } catch (_) {}
 
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+const { gemini, capText } = require("../utils/ai");
 
-// ==================== GEMINI SETUP ====================
-const GEMINI_API_KEYS = process.env.GEMINI_API_KEYS
-  ? process.env.GEMINI_API_KEYS.split(",").map(k => k.trim()).filter(Boolean)
-  : [];
-
-if (GEMINI_API_KEYS.length === 0) {
-  console.error("GEMINI_API_KEYS not set in .env");
-  process.exit(1);
-}
-
-const PRIMARY_MODEL = "gemini-2.5-flash";
-const FALLBACK_MODEL = "gemini-2.5-pro";
-
-class AIManager {
-  constructor(keys) {
-    this.keys = keys;
-    this.currentIdx = 0;
-    this.models = new Map();
-    this.initCurrentModel();
-  }
-
-  _getModel(key, modelName) {
-    const genAI = new GoogleGenerativeAI(key);
-    return genAI.getGenerativeModel({
-      model: modelName,
-      generationConfig: {
-        temperature: 0.7,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 8192,
-        responseMimeType: "application/json",
-      },
-    });
-  }
-
-  initCurrentModel() {
-    const key = this.keys[this.currentIdx];
-    try {
-      this.models.set(this.currentIdx, this._getModel(key, PRIMARY_MODEL));
-    } catch (e) {
-      this.models.set(this.currentIdx, null);
-    }
-  }
-
-  tryFallback(key) {
-    return this._getModel(key, FALLBACK_MODEL);
-  }
-
-  getCurrentModel() {
-    return this.models.get(this.currentIdx) ?? null;
-  }
-
-  async rotateIfNeeded(error) {
-    if (this.keys.length <= 1) return null;
-    const isRateLimit = error?.status === 429 || /quota|rate limit|429/i.test(error?.message || "");
-    if (!isRateLimit) return null;
-    this.currentIdx = (this.currentIdx + 1) % this.keys.length;
-    this.initCurrentModel();
-    return this.getCurrentModel();
-  }
-}
-
-const aiManager = new AIManager(GEMINI_API_KEYS);
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-// ==================== HELPER: AI generate with retries ====================
-async function generateWithRetry(model, prompt, manager) {
-  let current = model;
-  let attempts = 0;
-  let raw = "";
-  while (attempts < 6) {
-    try {
-      const result = await current.generateContent(prompt);
-      raw = result.response.text().trim();
-      if (raw) break;
-      throw new Error("Empty response");
-    } catch (err) {
-      attempts++;
-      if (err.message.includes("404") || attempts === 1) {
-        try { current = manager.tryFallback(manager.keys[manager.currentIdx]); } catch (_) {}
-      }
-      const rotated = await manager.rotateIfNeeded(err);
-      if (rotated) { current = rotated; attempts = 0; }
-      await sleep(2000 * Math.min(attempts, 3));
-    }
-  }
-  return raw;
-}
+// AI is now handled by the shared utils/ai.js singleton (gemini)
 
 // ==================== HELPER: extract text from PDF buffer ====================
 async function extractPdfText(buffer) {
@@ -175,8 +88,7 @@ router.post("/admin/create-manual", auth, async (req, res) => {
 
 // ==================== AI QUIZ GENERATION (multi-source) ====================
 router.post("/generate-quiz", auth, async (req, res) => {
-  let model = aiManager.getCurrentModel();
-  if (!model) return res.status(500).json({ error: "AI service unavailable" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
 
   try {
     const {
@@ -374,11 +286,12 @@ ${isTopicOnly ? "" : `Text:\n${safeContent}`}
       `.trim();
     }
 
-    const raw = await generateWithRetry(model, prompt, aiManager);
-
-    if (!raw) {
-      return res.status(500).json({ error: "Failed to generate quiz. Try again or simplify input." });
+    let raw;
+    try { raw = await gemini.generateText(prompt); } catch (aiErr) {
+      console.error("Quiz AI error:", aiErr.message);
+      return res.status(500).json({ error: `AI error: ${aiErr.message}` });
     }
+    if (!raw) return res.status(500).json({ error: "AI returned empty response. Try again." });
 
     let questions;
     let aiInferredSubject = null;
@@ -454,8 +367,7 @@ ${isTopicOnly ? "" : `Text:\n${safeContent}`}
 
 // ==================== EVALUATE ESSAY ANSWER (AI grading) ====================
 router.post("/evaluate-essay", auth, async (req, res) => {
-  let model = aiManager.getCurrentModel();
-  if (!model) return res.status(500).json({ error: "AI service unavailable" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
 
   try {
     const { question, userAnswer, modelAnswer } = req.body;
@@ -483,22 +395,18 @@ Return JSON ONLY:
 }
     `.trim();
 
-    const raw = await generateWithRetry(model, prompt, aiManager);
-
-    if (!raw) return res.status(500).json({ error: "AI evaluation failed" });
-
     let result;
     try {
-      const cleaned = raw.replace(/^```json\s*|```$/gi, "").trim();
-      result = JSON.parse(cleaned);
-      if (typeof result.score !== "number") throw new Error("Invalid score");
-    } catch {
-      return res.status(500).json({ error: "AI returned invalid evaluation" });
+      result = await gemini.generateJSON(prompt);
+      if (typeof result.score !== "number") throw new Error("Invalid score field");
+    } catch (aiErr) {
+      console.error("Essay eval AI error:", aiErr.message);
+      return res.status(500).json({ error: `AI evaluation failed: ${aiErr.message}` });
     }
 
     res.json({
-      success: true,
-      score: Math.min(100, Math.max(0, Math.round(result.score))),
+      success:  true,
+      score:    Math.min(100, Math.max(0, Math.round(result.score))),
       feedback: result.feedback || "Evaluation complete.",
     });
   } catch (err) {
@@ -509,8 +417,7 @@ Return JSON ONLY:
 
 // ==================== GENERATE EXPLANATIONS for existing quiz ====================
 router.post("/generate-explanations/:quizId", auth, async (req, res) => {
-  let model = aiManager.getCurrentModel();
-  if (!model) return res.status(500).json({ error: "AI service unavailable" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
 
   try {
     const quiz = await Quiz.findOne({ _id: req.params.quizId, userId: req.user.userId });

@@ -6,20 +6,7 @@ const User = require('../models/User');
 const QuizResult = require('../models/QuizResult');
 const Quiz = require('../models/Quiz');
 
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-require('dotenv').config();
-const GEMINI_KEYS = process.env.GEMINI_API_KEYS
-  ? process.env.GEMINI_API_KEYS.split(',').map(k => k.trim()).filter(Boolean) : [];
-let aiModel = null;
-if (GEMINI_KEYS.length > 0) {
-  try {
-    const genAI = new GoogleGenerativeAI(GEMINI_KEYS[0]);
-    aiModel = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
-      generationConfig: { temperature: 0.7, maxOutputTokens: 1024, responseMimeType: 'application/json' },
-    });
-  } catch (_) {}
-}
+const { gemini, capText } = require('../utils/ai');
 
 // ── Subject resolver ──────────────────────────────────────────────────────────
 // Maps a quiz title/subject to a specific academic topic so "General" is never
@@ -521,7 +508,7 @@ router.get('/forecaster', auth, async (req, res) => {
 
     // AI insight
     let aiInsight = null;
-    if (aiModel && subjectAnalysis.length > 0) {
+    if (gemini.ready && subjectAnalysis.length > 0) {
       try {
         const weakStr = weakList.map(s => `${s.subject}(${s.avgScore}%)`).join(', ') || 'none';
         const prompt  = `A student's quiz data: ${results.length} quizzes, learning speed "${learningSpeed}".
@@ -529,9 +516,7 @@ Weak subjects: ${weakStr}. Strong subjects: ${subjectAnalysis.filter(s => s.stat
 Write 2 concise exam forecast insights (each max 20 words) tailored to this data.
 Return JSON: { "insights": ["insight1", "insight2"] }`;
 
-        const raw    = await aiModel.generateContent(prompt);
-        const text   = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
-        const parsed = JSON.parse(text);
+        const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 256 });
         if (parsed.insights && parsed.insights.length > 0) aiInsight = parsed.insights;
       } catch (_) {}
     }

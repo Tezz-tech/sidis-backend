@@ -6,23 +6,7 @@ const StudyPlan = require('../models/StudyPlan');
 const Quiz      = require('../models/Quiz');
 const QuizResult = require('../models/QuizResult');
 
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-require('dotenv').config();
-
-const GEMINI_KEYS = process.env.GEMINI_API_KEYS
-  ? process.env.GEMINI_API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
-  : [];
-
-let aiModel = null;
-if (GEMINI_KEYS.length > 0) {
-  try {
-    const genAI = new GoogleGenerativeAI(GEMINI_KEYS[0]);
-    aiModel = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
-      generationConfig: { temperature: 0.7, maxOutputTokens: 8192, responseMimeType: 'application/json' },
-    });
-  } catch (_) {}
-}
+const { gemini, capText } = require('../utils/ai');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -124,7 +108,7 @@ router.post('/:planId/generate-schedule', auth, async (req, res) => {
 
     let sessions = [];
 
-    if (aiModel) {
+    if (gemini.ready) {
       const today_str = formatDate(today);
       const exam_str  = formatDate(examDate);
 
@@ -162,9 +146,7 @@ Return ONLY valid JSON with no markdown:
 }`;
 
       try {
-        const raw  = await aiModel.generateContent(prompt);
-        const text = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
-        const parsed = JSON.parse(text);
+        const parsed = await gemini.generateJSON(prompt);
         if (Array.isArray(parsed.sessions) && parsed.sessions.length > 0) {
           sessions = parsed.sessions.map(s => ({
             date:            new Date(s.date),
@@ -266,7 +248,7 @@ router.post('/:planId/session/:sessionId/start', auth, async (req, res) => {
       return res.json({ success: true, quizId: session.quizId, quizTitle: session.quizTitle });
     }
 
-    if (!aiModel)
+    if (!gemini.ready)
       return res.status(503).json({ error: 'AI generation unavailable. Check API key configuration.' });
 
     const examDate    = new Date(plan.examDate).toDateString();
@@ -332,13 +314,11 @@ Return ONLY valid JSON:
 
     let generatedQuestions = [];
     try {
-      const raw   = await aiModel.generateContent(quizPrompt);
-      const text  = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
-      const parsed = JSON.parse(text);
+      const parsed = await gemini.generateJSON(quizPrompt);
       if (Array.isArray(parsed.questions)) generatedQuestions = parsed.questions;
     } catch (aiErr) {
       console.error('AI quiz error:', aiErr.message);
-      return res.status(500).json({ error: 'AI failed to generate quiz. Please try again.' });
+      return res.status(500).json({ error: `AI failed to generate quiz: ${aiErr.message}` });
     }
 
     if (generatedQuestions.length === 0)

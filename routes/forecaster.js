@@ -13,26 +13,7 @@ try {
   try { pdfParse = require('pdf-parse'); } catch (_2) {}
 }
 
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-require('dotenv').config();
-
-const GEMINI_KEYS = process.env.GEMINI_API_KEYS
-  ? process.env.GEMINI_API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
-  : [];
-
-let aiModel = null;
-if (GEMINI_KEYS.length > 0) {
-  try {
-    const genAI = new GoogleGenerativeAI(GEMINI_KEYS[0]);
-    aiModel = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
-      generationConfig: { temperature: 0.7, maxOutputTokens: 8192, responseMimeType: 'application/json' },
-    });
-    console.log('Forecaster AI model: ready');
-  } catch (e) {
-    console.error('Forecaster AI init error:', e.message);
-  }
-}
+const { gemini, capText } = require('../utils/ai');
 
 // Sanitise Gemini patterns to ensure Mongoose types are correct
 function sanitisePatterns(raw) {
@@ -50,28 +31,22 @@ function sanitisePatterns(raw) {
 // ─── GET /api/forecaster/health ───────────────────────────────────────────────
 // Open endpoint — no auth needed. Shows whether AI key and pdf-parse are ready.
 router.get('/health', async (req, res) => {
-  let aiStatus = 'not initialized — GEMINI_API_KEYS missing or empty';
-  if (aiModel) {
+  let aiStatus = gemini.ready ? 'not tested' : 'not initialized — GEMINI_API_KEYS missing';
+  if (gemini.ready) {
     try {
-      const test = await aiModel.generateContent('Reply with exactly: {"ok":true}');
-      const txt  = test.response.text().trim();
-      JSON.parse(txt); // will throw if Gemini returned something unexpected
+      await gemini.generateJSON('Reply with this exact JSON and nothing else: {"ok":true}', { maxOutputTokens: 16 });
       aiStatus = 'ok';
     } catch (e) {
-      aiStatus = `key error: ${e.message}`;
+      aiStatus = `error: ${e.message}`;
     }
   }
-  res.json({
-    pdfParse: !!pdfParse,
-    ai:       aiStatus,
-    keys:     GEMINI_KEYS.length,
-  });
+  res.json({ ai: aiStatus, pdfParse: !!pdfParse, keys: gemini.keyCount });
 });
 
 // ─── POST /api/forecaster/analyze ─────────────────────────────────────────────
 router.post('/analyze', auth, async (req, res) => {
   try {
-    if (!aiModel)
+    if (!gemini.ready)
       return res.status(503).json({ error: 'AI analysis unavailable — check GEMINI_API_KEYS.' });
 
     if (!pdfParse)
@@ -145,9 +120,7 @@ Rules for patterns:
     let analysisSummary = '';
 
     try {
-      const raw    = await aiModel.generateContent(analysisPrompt);
-      const text   = raw.response.text().trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-      const parsed = JSON.parse(text);
+      const parsed = await gemini.generateJSON(analysisPrompt);
       if (typeof parsed.analysisSummary === 'string') analysisSummary = parsed.analysisSummary;
       patterns = sanitisePatterns(parsed.patterns);
     } catch (aiErr) {
@@ -188,7 +161,7 @@ Rules for patterns:
 // ─── POST /api/forecaster/:forecastId/generate-mock-exam ──────────────────────
 router.post('/:forecastId/generate-mock-exam', auth, async (req, res) => {
   try {
-    if (!aiModel)
+    if (!gemini.ready)
       return res.status(503).json({ error: 'AI generation unavailable.' });
 
     const forecast = await ExamForecast.findOne({ _id: req.params.forecastId, userId: req.user.userId });
@@ -224,9 +197,7 @@ Return ONLY valid JSON (no markdown):
 
     let generatedQuestions = [];
     try {
-      const raw    = await aiModel.generateContent(mockPrompt);
-      const text   = raw.response.text().trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-      const parsed = JSON.parse(text);
+      const parsed = await gemini.generateJSON(mockPrompt);
       if (Array.isArray(parsed.questions)) generatedQuestions = parsed.questions;
     } catch (aiErr) {
       console.error('Mock exam AI error:', aiErr.message);
@@ -285,7 +256,7 @@ Return ONLY valid JSON (no markdown):
 // ─── POST /api/forecaster/:forecastId/after-attempt ───────────────────────────
 router.post('/:forecastId/after-attempt', auth, async (req, res) => {
   try {
-    if (!aiModel)
+    if (!gemini.ready)
       return res.status(503).json({ error: 'AI forecast unavailable.' });
 
     const { score } = req.body;
@@ -319,9 +290,7 @@ Return 5-8 topics sorted by likelihood descending.`;
     let preparationAdvice = [];
 
     try {
-      const raw    = await aiModel.generateContent(forecastPrompt);
-      const text   = raw.response.text().trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-      const parsed = JSON.parse(text);
+      const parsed = await gemini.generateJSON(forecastPrompt);
       if (Array.isArray(parsed.forecastedTopics))  forecastedTopics  = parsed.forecastedTopics.map(t => ({
         topic:      String(t.topic || ''),
         likelihood: Number.isFinite(parseInt(t.likelihood)) ? parseInt(t.likelihood) : 50,

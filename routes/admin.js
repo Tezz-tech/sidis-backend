@@ -9,74 +9,8 @@ const ActivityLog = require("../models/ActivityLog");
 const PDFParser = require("pdf2json");
 const mammoth = require("mammoth");
 
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 require("dotenv").config();
-
-const GEMINI_API_KEYS = process.env.GEMINI_API_KEYS
-  ? process.env.GEMINI_API_KEYS.split(",").map(k => k.trim()).filter(Boolean)
-  : [];
-
-const PRIMARY_MODEL = "gemini-2.5-flash";
-const FALLBACK_MODEL = "gemini-2.5-pro";
-
-if (GEMINI_API_KEYS.length === 0) {
-  console.error("GEMINI_API_KEYS not set in .env");
-  process.exit(1);
-}
-
-// ==================== AI MANAGER (Shared) ====================
-class AIManager {
-  constructor(keys) {
-    this.keys = keys;
-    this.currentIdx = 0;
-    this.models = new Map();
-    this.initCurrentModel();
-  }
-
-  _getModel(key, modelName) {
-    const genAI = new GoogleGenerativeAI(key);
-    return genAI.getGenerativeModel({
-      model: modelName,
-      generationConfig: {
-        temperature: 0.7,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 8192,
-        responseMimeType: "application/json",
-      },
-    });
-  }
-
-  initCurrentModel() {
-    const key = this.keys[this.currentIdx];
-    try {
-      const model = this._getModel(key, PRIMARY_MODEL);
-      this.models.set(this.currentIdx, model);
-      console.log(`Admin AI Ready → Key #${this.currentIdx + 1} → ${PRIMARY_MODEL}`);
-    } catch (e) {
-      console.warn(`Primary model failed. Trying fallback for key #${this.currentIdx + 1}`);
-      this.models.set(this.currentIdx, this._getModel(key, FALLBACK_MODEL));
-    }
-  }
-
-  getCurrentModel() {
-    return this.models.get(this.currentIdx) ?? null;
-  }
-
-  async rotateIfNeeded(error) {
-    if (this.keys.length <= 1) return null;
-    const isRateLimit = error?.status === 429 || /quota|rate limit|429/i.test(error?.message || "");
-    if (!isRateLimit) return null;
-
-    console.warn(`Rate limit hit. Rotating key #${this.currentIdx + 1} → #${(this.currentIdx + 1) % this.keys.length + 1}`);
-    this.currentIdx = (this.currentIdx + 1) % this.keys.length;
-    this.initCurrentModel();
-    return this.getCurrentModel();
-  }
-}
-
-const aiManager = new AIManager(GEMINI_API_KEYS);
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+const { gemini, capText } = require("../utils/ai");
 
 // ==================== USERS MANAGEMENT ====================
 
@@ -597,8 +531,7 @@ router.get("/activity-logs", async (req, res) => {
 
 // ==================== ADMIN AI: Generate Quiz ====================
 router.post("/quizzes/generate", async (req, res) => {
-  let model = aiManager.getCurrentModel();
-  if (!model) return res.status(500).json({ error: "AI service unavailable" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
 
   try {
     const {
@@ -656,61 +589,29 @@ router.post("/quizzes/generate", async (req, res) => {
       return res.status(400).json({ error: "No readable text found" });
     }
 
-    const safeText = extractedText.slice(0, 60_000);
+    const safeText = capText(extractedText, 60000);
 
-    const prompt = `
-Generate ${numQuestions} multiple-choice questions.
-Subject: ${subject}
-Difficulty: ${difficulty}
-
-Output ONLY valid JSON array:
-[
-  {
-    "question": "Text?",
-    "options": ["A", "B", "C", "D"],
-    "correctAnswer": 0
-  }
-]
-
+    const prompt = `Generate ${numQuestions} multiple-choice questions.
+Subject: ${subject}. Difficulty: ${difficulty}.
+Return ONLY a valid JSON array, no markdown:
+[{"question":"...","options":["A","B","C","D"],"correctAnswer":0}]
 Content:
-${safeText}
-    `.trim();
-
-    let raw = "";
-    let attempts = 0;
-    while (attempts < 6) {
-      try {
-        const result = await model.generateContent(prompt);
-        raw = result.response.text().trim();
-        if (raw) break;
-      } catch (err) {
-        attempts++;
-        console.warn(`Quiz attempt ${attempts} failed:`, err.message);
-
-        if (err.message.includes("404") || attempts === 1) {
-          model = aiManager._getModel(aiManager.keys[aiManager.currentIdx], FALLBACK_MODEL);
-        }
-        const rotated = await aiManager.rotateIfNeeded(err);
-        if (rotated) { model = rotated; attempts = 0; }
-        await sleep(2000 * attempts);
-      }
-    }
-
-    if (!raw) return res.status(500).json({ error: "AI failed after retries" });
+${safeText}`.trim();
 
     let questions;
     try {
-      questions = JSON.parse(raw);
-      if (!Array.isArray(questions)) throw new Error();
+      const parsed = await gemini.generateJSON(prompt);
+      questions = Array.isArray(parsed) ? parsed : parsed?.questions || [];
       questions = questions
         .map(q => ({
           question: q.question?.trim(),
-          options: Array.isArray(q.options) ? q.options.slice(0, 4) : [],
-          correctAnswer: Number(q.correctAnswer)
+          options:  Array.isArray(q.options) ? q.options.slice(0, 4) : [],
+          correctAnswer: Number(q.correctAnswer),
         }))
         .filter(q => q.question && q.options.length === 4 && !isNaN(q.correctAnswer));
-    } catch {
-      return res.status(500).json({ error: "AI returned invalid JSON" });
+    } catch (aiErr) {
+      console.error("Admin quiz AI error:", aiErr.message);
+      return res.status(500).json({ error: `AI error: ${aiErr.message}` });
     }
 
     if (questions.length === 0) {
@@ -747,8 +648,7 @@ ${safeText}
 
 // ==================== ADMIN AI: Generate Flashcards ====================
 router.post("/flashcards/generate", async (req, res) => {
-  let model = aiManager.getCurrentModel();
-  if (!model) return res.status(500).json({ error: "AI service unavailable" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
 
   try {
     const { title = "Untitled Flashcards", subject = "General", content } = req.body;
@@ -790,53 +690,26 @@ router.post("/flashcards/generate", async (req, res) => {
       return res.status(400).json({ error: "No text extracted" });
     }
 
-    const safeText = extractedText.slice(0, 30_000);
+    const safeText = capText(extractedText, 30000);
 
-    const prompt = `
-Generate 12 high-quality flashcards.
-Subject: ${subject}
-
-Output ONLY valid JSON:
-[
-  {"question": "Term?", "answer": "Definition"}
-]
-
+    const prompt = `Generate 12 high-quality flashcards for ${subject}.
+Return ONLY a valid JSON array, no markdown:
+[{"question":"Term?","answer":"Definition"}]
 Content:
-${safeText}
-    `.trim();
-
-    let raw = "";
-    let attempts = 0;
-    while (attempts < 6) {
-      try {
-        const result = await model.generateContent(prompt);
-        raw = result.response.text().trim();
-        if (raw) break;
-      } catch (err) {
-        attempts++;
-        const rotated = await aiManager.rotateIfNeeded(err);
-        if (rotated) { model = rotated; attempts = 0; }
-        await sleep(2000 * attempts);
-      }
-    }
-
-    if (!raw) return res.status(500).json({ error: "AI failed" });
+${safeText}`.trim();
 
     let cards;
     try {
-      const cleaned = raw.replace(/^```json\s*|```$/gi, "").trim();
-      cards = JSON.parse(cleaned);
-      if (!Array.isArray(cards)) throw new Error();
-      cards = cards
+      const parsed = await gemini.generateJSON(prompt);
+      cards = (Array.isArray(parsed) ? parsed : parsed?.cards || [])
         .map(c => ({ question: c.question?.trim(), answer: c.answer?.trim() }))
         .filter(c => c.question && c.answer);
-    } catch {
-      return res.status(500).json({ error: "Invalid flashcard format" });
+    } catch (aiErr) {
+      console.error("Admin flashcard AI error:", aiErr.message);
+      return res.status(500).json({ error: `AI error: ${aiErr.message}` });
     }
 
-    if (cards.length === 0) {
-      return res.status(500).json({ error: "No valid cards" });
-    }
+    if (cards.length === 0) return res.status(500).json({ error: "No valid flashcards generated" });
 
     const set = new FlashcardSet({
       userId: null,

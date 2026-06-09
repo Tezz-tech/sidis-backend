@@ -10,24 +10,7 @@ const {
   getLevelInfo, checkNewBadges, awardXP,
 } = require('../utils/gamificationUtils');
 
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-require('dotenv').config();
-
-// AI setup (reuse keys from quizzes.js pattern)
-const GEMINI_KEYS = process.env.GEMINI_API_KEYS
-  ? process.env.GEMINI_API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
-  : [];
-
-let aiModel = null;
-if (GEMINI_KEYS.length > 0) {
-  try {
-    const genAI = new GoogleGenerativeAI(GEMINI_KEYS[0]);
-    aiModel = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
-      generationConfig: { temperature: 0.9, maxOutputTokens: 512, responseMimeType: 'application/json' },
-    });
-  } catch (_) {}
-}
+const { gemini } = require('../utils/ai');
 
 // ─── GET /api/gamification/profile ────────────────────────────────────────────
 router.get('/profile', auth, async (req, res) => {
@@ -222,7 +205,7 @@ router.get('/study-buddy', auth, async (req, res) => {
 
     // Try AI-powered personalized motivation message
     let aiMotivation = null;
-    if (aiModel && taken > 0) {
+    if (gemini.ready && taken > 0) {
       try {
         const prompt = `You are ${buddyName}, a friendly digital study mascot for a student learning app called Sidis.
 The student has: ${taken} quizzes taken, ${avgScore}% average score, ${streak}-day streak, ${xp} XP, Level ${level}.
@@ -231,9 +214,7 @@ ${weakSubjects.length > 0 ? `Weak subjects: ${weakSubjects.join(', ')}.` : 'No n
 Write ONE short motivational message (2-3 sentences max) as ${buddyName} to this student. Be warm, encouraging, specific to their stats, and add one actionable tip. Keep it under 60 words.
 Return JSON: { "message": "..." }`;
 
-        const raw = await aiModel.generateContent(prompt);
-        const text = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
-        const parsed = JSON.parse(text);
+        const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 256 });
         if (parsed.message) aiMotivation = parsed.message;
       } catch (_) { /* AI optional — silently skip */ }
     }
@@ -296,15 +277,13 @@ router.get('/study-journey', auth, async (req, res) => {
 
     // AI-powered personalised next step
     let aiNextStep = null;
-    if (aiModel && taken > 0) {
+    if (gemini.ready && taken > 0) {
       try {
         const prompt = `Student stats: ${taken} quizzes, ${avgScore}% avg, ${streak}-day streak, ${xp} XP.
 ${weakSubjects.length > 0 ? `Weak subjects: ${weakSubjects.join(', ')}.` : ''}
 Suggest ONE concise actionable study step for this student (max 25 words).
 Return JSON: { "step": "..." }`;
-        const raw = await aiModel.generateContent(prompt);
-        const text = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
-        const parsed = JSON.parse(text);
+        const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 128 });
         if (parsed.step) aiNextStep = parsed.step;
       } catch (_) {}
     }
@@ -527,16 +506,14 @@ router.get('/motivation', auth, async (req, res) => {
 
     // Generate AI motivation if available
     let aiMessage = null;
-    if (aiModel) {
+    if (gemini.ready) {
       try {
         const prompt = `You are an AI coach for a student learning app called Sidis.
 Student: ${taken} quizzes, ${avgScore}% avg score, ${streak}-day streak, ${xp} XP (Level ${level}: ${levelTitle}).
 Write ONE motivational push-notification message (max 20 words). Be specific and inspiring.
 Return JSON: { "title": "short title", "body": "message body" }`;
 
-        const raw = await aiModel.generateContent(prompt);
-        const text = raw.response.text().trim().replace(/^```json\s*|```$/gi, '').trim();
-        const parsed = JSON.parse(text);
+        const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 128 });
         if (parsed.title && parsed.body) aiMessage = parsed;
       } catch (_) {}
     }
