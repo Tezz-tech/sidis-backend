@@ -255,8 +255,7 @@ router.post('/:planId/session/:sessionId/start', auth, async (req, res) => {
     const sessionType = session.sessionType;
     const subject     = session.subject;
     const priority    = session.priority;
-    const mcqCount    = sessionType === 'review' ? 8 : 10;
-    const essayCount  = sessionType === 'review' ? 3 : 4;
+    const mcqCount    = sessionType === 'review' ? 8 : 12;
 
     // Check if user uploaded material for this subject
     const subjectMaterial = (plan.subjectMaterials || []).find(
@@ -265,52 +264,50 @@ router.post('/:planId/session/:sessionId/start', auth, async (req, res) => {
 
     let quizPrompt;
     if (subjectMaterial) {
-      // Material-based: questions come directly from uploaded notes/PDF
       quizPrompt = `You are an expert exam question creator for ${subject}.
-Based ONLY on the study material provided below, generate ${mcqCount} MCQ questions and ${essayCount} short-answer questions.
+Based ONLY on the study material below, generate exactly ${mcqCount} multiple-choice questions.
 
 Study Material:
 ${subjectMaterial.notes.slice(0, 7000)}
 
 Rules:
 - Every question must be directly traceable to the study material above
-- MCQ: exactly 4 options, one correct answer, plausible distractors
-- Short-answer: 2–4 sentence model answers drawn from the material
+- Each question has exactly 4 options (A, B, C, D), one correct answer, and plausible distractors
+- correctAnswer is the 0-based index of the correct option
+- Include a brief explanation for the correct answer
 - Difficulty: ${priority === 'high' ? 'hard — exam-level' : 'medium — solid understanding'}
-- Session type: ${sessionType}
+- Do NOT generate essay or short-answer questions
 
 Return ONLY valid JSON:
 {
   "questions": [
-    { "type": "mcq", "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "..." },
-    { "type": "essay", "question": "...", "modelAnswer": "..." }
+    { "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "..." }
   ]
 }`;
     } else {
-      // Generic: no material uploaded, use subject knowledge
       quizPrompt = `You are an expert exam question creator for ${subject}.
-Generate ${mcqCount} MCQ questions and ${essayCount} short-answer questions for a study session.
+Generate exactly ${mcqCount} multiple-choice questions for a study session.
 
 Context:
 - Subject: ${subject}
 - Exam: ${plan.examName} (${examDate})
 - Session type: ${sessionType}
-- Priority: ${priority} ${priority === 'high' ? '— focus on difficult/commonly examined topics' : ''}
+- Priority: ${priority}${priority === 'high' ? ' — focus on difficult/commonly examined topics' : ''}
 
 Rules:
-- Questions must test real subject knowledge (not trivial)
-- MCQ: exactly 4 options, one correct answer
-- Short-answer: 2–4 sentence model answers
-- Match difficulty to an actual exam paper for this subject
+- Questions must test real subject knowledge at exam standard
+- Each question has exactly 4 options, one correct answer, plausible distractors
+- correctAnswer is the 0-based index (0–3)
+- Include a concise explanation for the correct answer
+- Do NOT generate essay or short-answer questions
 
 Return ONLY valid JSON:
 {
   "questions": [
-    { "type": "mcq", "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "..." },
-    { "type": "essay", "question": "...", "modelAnswer": "..." }
+    { "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "..." }
   ]
 }`;
-    } // end else (no material)
+    }
 
     let generatedQuestions = [];
     try {
@@ -324,26 +321,15 @@ Return ONLY valid JSON:
     if (generatedQuestions.length === 0)
       return res.status(500).json({ error: 'AI returned no questions. Please try again.' });
 
-    const mcq   = generatedQuestions.filter(q => q.type === 'mcq');
-    const essay = generatedQuestions.filter(q => q.type === 'essay');
-    const questionType = mcq.length > 0 && essay.length > 0 ? 'mixed' : mcq.length > 0 ? 'mcq' : 'essay';
-
-    const quizQuestions = generatedQuestions.map(q => {
-      if (q.type === 'mcq') return {
+    const quizQuestions = generatedQuestions
+      .filter(q => q.question && Array.isArray(q.options) && q.options.length >= 2)
+      .map(q => ({
         question:      q.question,
-        options:       Array.isArray(q.options) ? q.options.slice(0, 4) : [],
-        correctAnswer: typeof q.correctAnswer === 'number' ? q.correctAnswer : 0,
+        options:       q.options.slice(0, 4),
+        correctAnswer: typeof q.correctAnswer === 'number' ? Math.min(q.correctAnswer, q.options.length - 1) : 0,
         modelAnswer:   '',
         explanation:   q.explanation || '',
-      };
-      return {
-        question:      q.question,
-        options:       [],
-        correctAnswer: null,
-        modelAnswer:   q.modelAnswer || '',
-        explanation:   '',
-      };
-    });
+      }));
 
     const quizTitle = `${subject} — ${plan.examName} (${sessionType === 'review' ? 'Revision' : 'Practice'})`;
     const quiz = await Quiz.create({
@@ -351,9 +337,9 @@ Return ONLY valid JSON:
       title:          quizTitle,
       subject,
       difficulty:     priority === 'high' ? 'hard' : 'medium',
-      timeLimit:      Math.max(15, Math.ceil(quizQuestions.length * 2.5)),
+      timeLimit:      Math.max(15, Math.ceil(quizQuestions.length * 2)),
       numQuestions:   quizQuestions.length,
-      questionType,
+      questionType:   'mcq',
       questions:      quizQuestions,
       isPublic:       false,
       isAdminCreated: false,
@@ -441,8 +427,10 @@ router.get('/:planId', auth, async (req, res) => {
     const plan = await StudyPlan.findOne({ _id: req.params.planId, userId: req.user.userId }).lean();
     if (!plan) return res.status(404).json({ error: 'Plan not found' });
 
-    const today    = new Date();
-    const daysLeft = Math.max(0, Math.ceil((new Date(plan.examDate) - today) / 86400000));
+    const now      = new Date();
+    const todayStart = new Date(now);
+    todayStart.setUTCHours(0, 0, 0, 0);
+    const daysLeft = Math.max(0, Math.ceil((new Date(plan.examDate) - now) / 86400000));
     const total    = plan.schedule.length;
     const completed = plan.schedule.filter(s => s.completed).length;
 
@@ -453,11 +441,15 @@ router.get('/:planId', auth, async (req, res) => {
       completed,
       progress: total > 0 ? Math.round((completed / total) * 100) : 0,
       schedule: plan.schedule
-        .map(s => ({
-          ...s,
-          isPast:   new Date(s.date) < today && !s.completed,
-          isToday:  new Date(s.date).toDateString() === today.toDateString(),
-        }))
+        .map(s => {
+          const sessionDay = new Date(s.date);
+          sessionDay.setUTCHours(0, 0, 0, 0);
+          return {
+            ...s,
+            isPast:  sessionDay < todayStart && !s.completed,
+            isToday: sessionDay.getTime() === todayStart.getTime(),
+          };
+        })
         .sort((a, b) => new Date(a.date) - new Date(b.date)),
     };
 
