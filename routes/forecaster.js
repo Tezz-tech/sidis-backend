@@ -111,23 +111,24 @@ TASK: Identify the most frequently tested topics.
 
 Return ONLY valid JSON (no markdown, no extra text):
 {
-  "analysisSummary": "2-3 sentence summary of the main exam patterns and topics",
+  "analysisSummary": "One sentence summary of the main exam patterns.",
   "patterns": [
     { "topic": "Topic name", "frequency": 4, "confidence": "High", "lastAppeared": "2024" }
   ]
 }
 
 RULES:
+- analysisSummary MUST be ONE sentence only, under 25 words
 - frequency = integer count of how many times topic appeared
 - confidence = exactly one of: "High", "Medium", "Low"
-- Return 6 to 12 patterns, sorted by frequency descending
-- Keep topic names concise (3-6 words max)`;
+- Return 6 to 10 patterns, sorted by frequency descending
+- Keep topic names concise (2-5 words max)`;
 
     let patterns        = [];
     let analysisSummary = '';
 
     try {
-      const parsed = await gemini.generateJSON(analysisPrompt, { maxOutputTokens: 2048, temperature: 0.4 });
+      const parsed = await gemini.generateJSON(analysisPrompt, { maxOutputTokens: 8192, temperature: 0.4 });
       if (typeof parsed.analysisSummary === 'string' && parsed.analysisSummary) {
         analysisSummary = parsed.analysisSummary;
       }
