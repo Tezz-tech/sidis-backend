@@ -24,7 +24,7 @@ const PLANS = {
 };
 
 function paystackHeaders() {
-  return { Authorization: `Bearer ${PAYSTACK_SECRET}`, 'Content-Type': 'application/json' };
+  return { Authorization: `Bearer ${(PAYSTACK_SECRET || '').trim()}`, 'Content-Type': 'application/json' };
 }
 
 // ── GET /api/payments/plans (public) ─────────────────────────────────────────
@@ -129,6 +129,40 @@ router.post('/prepare', auth, async (req, res) => {
     });
   } catch (err) {
     console.error('[payments] prepare error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/payments/activate ───────────────────────────────────────────────
+// Called by frontend immediately after Paystack confirms success.
+// Activates the pending subscription without a server-side Paystack API call.
+// The Paystack webhook (below) remains as an independent safety net.
+router.post('/activate', auth, async (req, res) => {
+  try {
+    const { reference } = req.body;
+    if (!reference) return res.status(400).json({ error: 'Reference required' });
+
+    const sub = await Subscription.findOne({
+      paystackReference: reference,
+      userId:            req.user.userId,
+    });
+    if (!sub) return res.status(404).json({ error: 'Payment record not found.' });
+
+    if (sub.status === 'active') {
+      return res.json({ success: true, subscription: sub, alreadyActive: true });
+    }
+
+    const planConfig = PLANS[sub.plan];
+    const now        = new Date();
+    sub.status    = 'active';
+    sub.startDate = now;
+    sub.expiresAt = new Date(now.getTime() + planConfig.durationDays * 86400 * 1000);
+    await sub.save();
+
+    console.log(`[payments] activated ${sub.planName} for user ${req.user.userId} until ${sub.expiresAt.toISOString()}`);
+    res.json({ success: true, subscription: sub });
+  } catch (err) {
+    console.error('[payments] activate error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
