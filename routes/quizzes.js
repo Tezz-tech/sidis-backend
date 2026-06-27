@@ -90,6 +90,31 @@ router.post("/admin/create-manual", auth, async (req, res) => {
 router.post("/generate-quiz", auth, async (req, res) => {
   if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
 
+  // ── Subscription gate: enforce 5 AI quizzes/month for free + exam_mode users ──
+  try {
+    const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
+    const plan     = await getUserPlan(req.user.userId);
+    const features = getPlanFeatures(plan);
+
+    if (!features.unlimitedQuizzes) {
+      const monthStart = new Date();
+      monthStart.setDate(1);
+      monthStart.setHours(0, 0, 0, 0);
+      const count = await Quiz.countDocuments({
+        userId: req.user.userId, isAdminCreated: false, createdAt: { $gte: monthStart },
+      });
+      if (count >= features.aiQuizzesPerMonth) {
+        return res.status(403).json({
+          error:     'monthly_limit_reached',
+          message:   `You've used all ${features.aiQuizzesPerMonth} AI quiz generations for this month. Upgrade your plan for unlimited quizzes.`,
+          limit:     features.aiQuizzesPerMonth,
+          used:      count,
+          planName:  plan === 'free' ? 'Free' : 'Exam Mode',
+        });
+      }
+    }
+  } catch (_) { /* if subscription check fails, allow through */ }
+
   try {
     const {
       title, subject, numQuestions = 10, difficulty = "medium",

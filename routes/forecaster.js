@@ -5,6 +5,25 @@ const auth         = require('../middlewares/auth');
 const ExamForecast = require('../models/ExamForecast');
 const Quiz         = require('../models/Quiz');
 const { gemini }   = require('../utils/ai');
+const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
+
+// Middleware: only monthly_group and yearly_group can access the forecaster
+async function requireForecasterAccess(req, res, next) {
+  try {
+    const plan     = await getUserPlan(req.user.userId);
+    const features = getPlanFeatures(plan);
+    if (!features.forecaster) {
+      return res.status(403).json({
+        error:    'plan_required',
+        message:  'The Question Forecaster is available on Monthly Group and Yearly Group plans.',
+        required: 'monthly_group',
+      });
+    }
+    next();
+  } catch (err) {
+    next(); // fail open so a DB error doesn't permanently lock users out
+  }
+}
 
 // ── PDF parser (try lib path first to skip v2 test-fixture; fall back to main) ─
 let pdfParse = null;
@@ -60,11 +79,11 @@ router.get('/health', async (req, res) => {
   res.json({ ai: aiStatus, pdfParse: !!pdfParse, keys: gemini.keyCount });
 });
 
-// ── POST /api/forecaster/analyze ──────────────────────────────────────────────
+// ── POST /api/forecaster/analyze ─────────────────────────────────────────────
 // Accepts EITHER:
 //   multipart: fields { examSubject } + files { pdfs }
 //   JSON:      { examSubject, pastedText }
-router.post('/analyze', auth, async (req, res) => {
+router.post('/analyze', auth, requireForecasterAccess, async (req, res) => {
   try {
     if (!gemini.ready)
       return res.status(503).json({ error: 'AI unavailable — GEMINI_API_KEYS not set in environment variables.' });
@@ -173,7 +192,7 @@ RULES:
 });
 
 // ── POST /api/forecaster/:forecastId/generate-mock-exam ──────────────────────
-router.post('/:forecastId/generate-mock-exam', auth, async (req, res) => {
+router.post('/:forecastId/generate-mock-exam', auth, requireForecasterAccess, async (req, res) => {
   try {
     if (!gemini.ready)
       return res.status(503).json({ error: 'AI unavailable — check GEMINI_API_KEYS.' });
@@ -297,7 +316,7 @@ likelihood = integer 0-100. confidence = exactly "High", "Medium", or "Low".`;
 });
 
 // ── GET /api/forecaster/my-forecasts ─────────────────────────────────────────
-router.get('/my-forecasts', auth, async (req, res) => {
+router.get('/my-forecasts', auth, requireForecasterAccess, async (req, res) => {
   try {
     const forecasts = await ExamForecast.find({ userId: req.user.userId })
       .select('-combinedText').sort({ createdAt: -1 }).lean();

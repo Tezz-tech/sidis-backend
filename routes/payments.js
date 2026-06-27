@@ -6,6 +6,8 @@ const crypto       = require('crypto');
 const auth         = require('../middlewares/auth');
 const Subscription = require('../models/Subscription');
 const User         = require('../models/User');
+const Quiz         = require('../models/Quiz');
+const { getUserPlan, getPlanFeatures, PLAN_NAMES } = require('../utils/subscription');
 
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
 const PAYSTACK_BASE   = 'https://api.paystack.co';
@@ -49,6 +51,43 @@ router.get('/my-subscription', auth, async (req, res) => {
     }).sort({ createdAt: -1 }).lean();
 
     res.json({ success: true, subscription: sub || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/payments/my-features ─────────────────────────────────────────────
+// Returns the current user's plan key, display name, feature flags,
+// and usage counters (AI quizzes this month, SID IQ uses this month).
+router.get('/my-features', auth, async (req, res) => {
+  try {
+    const plan     = await getUserPlan(req.user.userId);
+    const features = getPlanFeatures(plan);
+
+    // Count AI quizzes generated this month (free users have a 5/month cap)
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const aiQuizzesThisMonth = await Quiz.countDocuments({
+      userId:         req.user.userId,
+      isAdminCreated: false,
+      createdAt:      { $gte: monthStart },
+    });
+
+    res.json({
+      success:          true,
+      plan,
+      planName:         PLAN_NAMES[plan] || 'Free',
+      features,
+      usage: {
+        aiQuizzesThisMonth,
+        aiQuizzesLimit: features.unlimitedQuizzes ? null : features.aiQuizzesPerMonth,
+        aiQuizzesRemaining: features.unlimitedQuizzes
+          ? null
+          : Math.max(0, features.aiQuizzesPerMonth - aiQuizzesThisMonth),
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
