@@ -183,6 +183,7 @@ Return ONLY valid JSON with no markdown:
 // Upload PDF or paste notes for a specific subject. Accepts multipart (field: pdf)
 // OR JSON { subject, notes }.
 router.post('/:planId/subject-material', auth, async (req, res) => {
+  console.log('[studyplanner] subject-material hit, planId:', req.params.planId, 'hasFile:', !!req.files?.pdf, 'bodyKeys:', Object.keys(req.body || {}));
   try {
     const plan = await StudyPlan.findOne({ _id: req.params.planId, userId: req.user.userId });
     if (!plan) return res.status(404).json({ error: 'Plan not found' });

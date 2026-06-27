@@ -9,7 +9,7 @@ const flashcardRoutes = require('./routes/flashcards');
 let gamificationRoutes = null;
 try { gamificationRoutes = require('./routes/gamification'); } catch (e) { console.error('gamification load error:', e.message); }
 let studyPlannerRoutes = null;
-try { studyPlannerRoutes = require('./routes/studyplanner'); } catch (e) { console.error('studyplanner load error:', e.message); }
+try { studyPlannerRoutes = require('./routes/studyplanner'); console.log('studyplanner routes: loaded'); } catch (e) { console.error('studyplanner load error:', e.message, e.stack); }
 let forecasterRoutes = null;
 try { forecasterRoutes = require('./routes/forecaster'); console.log('forecaster routes: loaded'); } catch (e) { console.error('forecaster load error:', e.message, e.stack); }
 let supportRoutes = null;
@@ -112,6 +112,12 @@ if (!adminRouter || (typeof adminRouter !== 'function' && typeof adminRouter !==
 
 app.use('/api/flashcards', flashcardRoutes);
 if (gamificationRoutes)  app.use('/api/gamification',  gamificationRoutes);
+
+// Study planner inline health check — always reachable regardless of router load
+app.get('/api/study-planner/ping', (req, res) => {
+  res.json({ ok: true, routesLoaded: !!studyPlannerRoutes });
+});
+
 if (studyPlannerRoutes)  app.use('/api/study-planner', studyPlannerRoutes);
 if (forecasterRoutes)    app.use('/api/forecaster',    forecasterRoutes);
 if (supportRoutes)       app.use('/api/support',       supportRoutes);
