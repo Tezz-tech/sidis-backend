@@ -36,7 +36,7 @@
     "paypal-rest-sdk": "^1.8.1",
     "paystack-api": "^2.0.6",
     "pdf-lib": "^1.17.1",
-    "pdf-parse": "^2.4.5",
+    "pdf-parse": "^1.1.1",
     "pdf2json": "^4.0.0"
   },
   "devDependencies": {
