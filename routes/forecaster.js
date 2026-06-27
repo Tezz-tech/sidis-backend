@@ -185,21 +185,26 @@ router.post('/:forecastId/generate-mock-exam', auth, async (req, res) => {
 
     const topTopics = (forecast.patterns || []).slice(0, 8).map(p => p.topic).join(', ') || 'General topics';
 
-    const mockPrompt = `Create a realistic mock ${forecast.examSubject} exam.
-Focus on these high-frequency topics: ${topTopics}
+    const mockPrompt = `Create a mock ${forecast.examSubject} exam.
+Topics to cover: ${topTopics}
 
-Generate exactly 10 MCQ and 5 essay questions.
-Return ONLY valid JSON (no markdown):
+Generate exactly 8 MCQ and 4 essay questions (12 total).
+Return ONLY valid JSON (no markdown, no extra text):
 {
   "questions": [
-    { "type": "mcq", "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "..." },
-    { "type": "essay", "question": "...", "modelAnswer": "2-4 sentence model answer" }
+    { "type": "mcq", "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "One sentence." },
+    { "type": "essay", "question": "...", "modelAnswer": "One sentence model answer." }
   ]
-}`;
+}
+
+STRICT RULES:
+- explanation: ONE sentence only
+- modelAnswer: ONE sentence only
+- options: exactly 4 short strings each`;
 
     let generated = [];
     try {
-      const parsed = await gemini.generateJSON(mockPrompt, { maxOutputTokens: 4096, temperature: 0.6 });
+      const parsed = await gemini.generateJSON(mockPrompt, { maxOutputTokens: 8192, temperature: 0.6 });
       if (Array.isArray(parsed.questions)) generated = parsed.questions;
       if (generated.length === 0) throw new Error('AI returned empty questions array.');
     } catch (aiErr) {
