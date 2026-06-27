@@ -93,6 +93,46 @@ router.get('/my-features', auth, async (req, res) => {
   }
 });
 
+// ── POST /api/payments/prepare ────────────────────────────────────────────────
+// Inline popup flow: generates reference + returns user email so frontend
+// can open PaystackPop directly without a server-side Paystack API call.
+router.post('/prepare', auth, async (req, res) => {
+  try {
+    const { plan } = req.body;
+    if (!plan || !PLANS[plan])
+      return res.status(400).json({ error: `Unknown plan: ${plan}` });
+
+    const user = await User.findById(req.user.userId).lean();
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+
+    const planConfig = PLANS[plan];
+    const reference  = `SIDIS_${plan}_${req.user.userId}_${Date.now()}`;
+
+    await Subscription.create({
+      userId:            req.user.userId,
+      plan,
+      planName:          planConfig.name,
+      amount:            planConfig.amount,
+      status:            'pending',
+      paystackReference: reference,
+      isGroup:           planConfig.isGroup,
+    });
+
+    res.json({
+      success:   true,
+      reference,
+      email:     user.email,
+      amount:    planConfig.amount,
+      amountNGN: planConfig.amount / 100,
+      planName:  planConfig.name,
+      plan,
+    });
+  } catch (err) {
+    console.error('[payments] prepare error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── POST /api/payments/initialize ─────────────────────────────────────────────
 // Body: { plan, callbackUrl }
 router.post('/initialize', auth, async (req, res) => {
