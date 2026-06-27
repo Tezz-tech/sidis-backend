@@ -249,7 +249,7 @@ router.post('/:planId/session/:sessionId/start', auth, async (req, res) => {
     }
 
     if (!gemini.ready)
-      return res.status(503).json({ error: 'AI generation unavailable. Check API key configuration.' });
+      return res.status(503).json({ error: 'AI is temporarily unavailable. Please mark this session as done manually after reviewing the subject, or try again later.' });
 
     const examDate    = new Date(plan.examDate).toDateString();
     const sessionType = session.sessionType;
@@ -315,7 +315,12 @@ Return ONLY valid JSON:
       if (Array.isArray(parsed.questions)) generatedQuestions = parsed.questions;
     } catch (aiErr) {
       console.error('AI quiz error:', aiErr.message);
-      return res.status(500).json({ error: `AI failed to generate quiz: ${aiErr.message}` });
+      const isQuotaOrSuspended = /quota|rate.?limit|suspended|permission denied|403/i.test(aiErr.message || '');
+      return res.status(503).json({
+        error: isQuotaOrSuspended
+          ? 'AI quota exceeded or key suspended. Please mark this session as done manually after studying, or contact support to update the API key.'
+          : 'Quiz generation temporarily failed. Please try again in a moment.',
+      });
     }
 
     if (generatedQuestions.length === 0)
