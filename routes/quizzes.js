@@ -834,15 +834,25 @@ router.get("/public/sets", async (req, res) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
 
+    // Search matches across the ENTIRE public collection (title or subject),
+    // not just the currently-loaded page.
+    const search = (req.query.search || "").trim();
+    const filter = search
+      ? { $or: [
+          { title:   { $regex: search, $options: "i" } },
+          { subject: { $regex: search, $options: "i" } },
+        ] }
+      : {};
+
     const [quizzes, total] = await Promise.all([
-      Quiz.find({})
+      Quiz.find(filter)
         .select("title subject difficulty numQuestions timeLimit createdAt authorName questionType")
         .populate("userId", "fullName")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
-      Quiz.countDocuments({}),
+      Quiz.countDocuments(filter),
     ]);
 
     const formatted = quizzes.map(q => ({

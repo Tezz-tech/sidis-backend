@@ -308,9 +308,19 @@ router.get("/public/sets", async (req, res) => {  // Removed: auth
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
 
+    // Search matches across the ENTIRE public collection (title or subject),
+    // not just the currently-loaded page.
+    const search = (req.query.search || "").trim();
+    const searchFilter = search
+      ? { $or: [
+          { title:   { $regex: search, $options: "i" } },
+          { subject: { $regex: search, $options: "i" } },
+        ] }
+      : {};
+
     // Fetch ALL flashcard sets (no isPublic filter)
     const [sets, total] = await Promise.all([
-      FlashcardSet.find({})  // Removed: isPublic: true
+      FlashcardSet.find(searchFilter)  // Removed: isPublic: true
         .select("title subject cards createdAt lastStudied authorName")
         .populate("userId", "fullName")
         .sort({ createdAt: -1 })
@@ -318,7 +328,7 @@ router.get("/public/sets", async (req, res) => {  // Removed: auth
         .limit(limit)
         .lean(),
 
-      FlashcardSet.countDocuments({})  // Removed: isPublic: true
+      FlashcardSet.countDocuments(searchFilter)  // Removed: isPublic: true
     ]);
 
     const formatted = sets.map(s => ({
