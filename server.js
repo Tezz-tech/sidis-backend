@@ -20,6 +20,8 @@ let adaptiveRoutes = null;
 try { adaptiveRoutes = require('./routes/adaptive'); console.log('adaptive routes: loaded'); } catch (e) { console.error('adaptive load error:', e.message, e.stack); }
 let collaborationRoutes = null;
 try { collaborationRoutes = require('./routes/collaboration'); console.log('collaboration routes: loaded'); } catch (e) { console.error('collaboration load error:', e.message, e.stack); }
+let groupRoutes = null;
+try { groupRoutes = require('./routes/group'); console.log('group routes: loaded'); } catch (e) { console.error('group load error:', e.message, e.stack); }
 const fileUpload = require('express-fileupload');
 const cors = require('cors');
 require('dotenv').config();
@@ -130,6 +132,7 @@ if (supportRoutes)       app.use('/api/support',       supportRoutes);
 if (paymentRoutes)       app.use('/api/payments',      paymentRoutes);
 if (adaptiveRoutes)      app.use('/api/adaptive',      adaptiveRoutes);
 if (collaborationRoutes) app.use('/api/collaboration', collaborationRoutes);
+if (groupRoutes)         app.use('/api/group',         groupRoutes);
 
 // -------------------------------------------------
 // 5. JSON 404 for any unmatched route (so CORS headers are always present)

@@ -7,7 +7,8 @@ const auth         = require('../middlewares/auth');
 const Subscription = require('../models/Subscription');
 const User         = require('../models/User');
 const Quiz         = require('../models/Quiz');
-const { getUserPlan, getPlanFeatures, PLAN_NAMES } = require('../utils/subscription');
+const { getPlanFeatures, PLAN_NAMES, getEffectiveSubscription } = require('../utils/subscription');
+const MAX_GROUP_MEMBERS = 2;
 
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
 const PAYSTACK_BASE   = 'https://api.paystack.co';
@@ -61,7 +62,8 @@ router.get('/my-subscription', auth, async (req, res) => {
 // and usage counters (AI quizzes this month, SID IQ uses this month).
 router.get('/my-features', auth, async (req, res) => {
   try {
-    const plan     = await getUserPlan(req.user.userId);
+    const { subscription, viaGroup } = await getEffectiveSubscription(req.user.userId);
+    const plan     = subscription ? subscription.plan : 'free';
     const features = getPlanFeatures(plan);
 
     // Count AI quizzes generated this month (free users have a 5/month cap)
@@ -75,6 +77,20 @@ router.get('/my-features', auth, async (req, res) => {
       createdAt:      { $gte: monthStart },
     });
 
+    // Group plan context — either the caller owns the group plan, or they
+    // joined someone else's as an invited member.
+    let isGroupOwner = false, groupSeats = null, isGroupMember = false, groupOwnerName = null;
+    if (subscription?.isGroup) {
+      if (viaGroup) {
+        isGroupMember = true;
+        const owner = await User.findById(subscription.userId).select('fullName').lean();
+        groupOwnerName = owner?.fullName || null;
+      } else {
+        isGroupOwner = true;
+        groupSeats = { used: subscription.members?.length || 0, total: MAX_GROUP_MEMBERS };
+      }
+    }
+
     res.json({
       success:          true,
       plan,
@@ -87,6 +103,10 @@ router.get('/my-features', auth, async (req, res) => {
           ? null
           : Math.max(0, features.aiQuizzesPerMonth - aiQuizzesThisMonth),
       },
+      isGroupOwner,
+      groupSeats,
+      isGroupMember,
+      groupOwnerName,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
