@@ -7,6 +7,13 @@ const essayAnswerSchema = new mongoose.Schema({
   aiFeedback: { type: String, default: '' },
 }, { _id: false });
 
+const topicOutcomeSchema = new mongoose.Schema({
+  questionIndex: Number,
+  subject: String,
+  topic: String,
+  correct: Boolean,
+}, { _id: false });
+
 const quizResultSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   quizId: { type: mongoose.Schema.Types.ObjectId, ref: 'Quiz', required: true },
@@ -18,6 +25,9 @@ const quizResultSchema = new mongoose.Schema({
   subjectTag: { type: String, default: 'General' },
   correctCount: { type: Number, default: 0 },
   totalCount: { type: Number, default: 0 },
+  // Per-question topic + correctness, used by the adaptive learning engine
+  // to detect repeated weak spots at the sub-topic level (not just subject).
+  topicBreakdown: { type: [topicOutcomeSchema], default: [] },
   createdAt: { type: Date, default: Date.now },
 });
 

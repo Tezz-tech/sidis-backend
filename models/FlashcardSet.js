@@ -5,6 +5,8 @@ const CardSchema = new mongoose.Schema({
   question: { type: String, required: true },
   answer:   { type: String, required: true },
   masteryLevel: { type: Number, default: 0, min: 0, max: 100 },
+  // Specific sub-topic this card tests, e.g. "Depreciation" (parent subject: "Accounting").
+  topic: { type: String, default: '' },
 });
 
 const FlashcardSetSchema = new mongoose.Schema({

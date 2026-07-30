@@ -13,6 +13,8 @@ let awardXP = null;
 try { ({ awardXP } = require("../utils/gamificationUtils")); } catch (_) {}
 
 const { gemini, capText } = require("../utils/ai");
+const { resolveSpecificSubject } = require("../utils/subjectResolver");
+const { processQuizResult } = require("../utils/adaptiveEngine");
 
 // AI is now handled by the shared utils/ai.js singleton (gemini)
 
@@ -68,6 +70,7 @@ router.post("/admin/create-manual", auth, async (req, res) => {
         correctAnswer: q.correctAnswer ?? null,
         modelAnswer: q.modelAnswer?.trim() || "",
         explanation: q.explanation?.trim() || "",
+        topic: q.topic?.trim() || "",
       })),
       isAdminCreated: true,
       isPublic: true,
@@ -278,7 +281,8 @@ Return a JSON OBJECT with this exact structure:
     {
       "question": "Essay question text?",
       "modelAnswer": "Comprehensive model answer here.",
-      "explanation": "Why this answer is correct."
+      "explanation": "Why this answer is correct.",
+      "topic": "The specific sub-topic this question tests (e.g. 'Depreciation', not just 'Accounting')"
     }
   ]
 }
@@ -301,7 +305,8 @@ Return a JSON OBJECT with this exact structure:
       "question": "Question text?",
       "options": ["Option A", "Option B", "Option C", "Option D"],
       "correctAnswer": 0,
-      "explanation": "Brief explanation of why this answer is correct."
+      "explanation": "Brief explanation of why this answer is correct.",
+      "topic": "The specific sub-topic this question tests (e.g. 'Depreciation', not just 'Accounting')"
     }
   ]
 }
@@ -342,6 +347,7 @@ ${isTopicOnly ? "" : `Text:\n${safeContent}`}
             explanation: q.explanation?.trim() || "",
             options: [],
             correctAnswer: null,
+            topic: q.topic?.trim() || "",
           }))
           .filter(q => q.question && q.modelAnswer);
       } else {
@@ -352,6 +358,7 @@ ${isTopicOnly ? "" : `Text:\n${safeContent}`}
             correctAnswer: Number(q.correctAnswer),
             explanation: q.explanation?.trim() || "",
             modelAnswer: "",
+            topic: q.topic?.trim() || "",
           }))
           .filter(q => q.question && q.options.length === 4 && !isNaN(q.correctAnswer));
       }
@@ -468,14 +475,12 @@ Return a JSON array with one explanation per question (in the same order):
 ["Explanation for Q1", "Explanation for Q2", ...]
     `.trim();
 
-    const raw = await generateWithRetry(model, prompt, aiManager);
-
     let explanations;
     try {
-      const cleaned = raw.replace(/^```json\s*|```$/gi, "").trim();
-      explanations = JSON.parse(cleaned);
+      explanations = await gemini.generateJSON(prompt);
       if (!Array.isArray(explanations)) throw new Error("Not array");
-    } catch {
+    } catch (aiErr) {
+      console.error("Generate explanations AI error:", aiErr.message);
       return res.status(500).json({ error: "AI returned invalid explanations" });
     }
 
@@ -490,6 +495,122 @@ Return a JSON array with one explanation per question (in the same order):
     res.json({ success: true, message: "Explanations generated!", count: idx });
   } catch (err) {
     console.error("Generate explanations error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ==================== AI TUTOR: why wrong + correct concept ====================
+// Embedded in the post-quiz review screen (TakeQuiz.jsx QuestionBreakdown).
+// Result is cached onto the question so repeat views cost no AI calls.
+router.post("/:quizId/tutor-explain", auth, async (req, res) => {
+  try {
+    const quiz = await Quiz.findById(req.params.quizId);
+    if (!quiz) return res.status(404).json({ error: "Quiz not found" });
+    if (quiz.userId && quiz.userId.toString() !== req.user.userId && !quiz.isPublic) {
+      return res.status(403).json({ error: "Not authorized to view this quiz" });
+    }
+
+    const { questionIndex } = req.body;
+    const q = quiz.questions[questionIndex];
+    if (!q) return res.status(400).json({ error: "Invalid questionIndex" });
+
+    if (q.explanation && q.conceptNote) {
+      return res.json({ success: true, whyWrong: q.explanation, correctConcept: q.conceptNote, cached: true });
+    }
+
+    if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
+
+    const topic = q.topic || quiz.subject;
+    const prompt = `You are a patient tutor helping a student who got this ${quiz.subject} question wrong (topic: ${topic}).
+
+Question: ${q.question}
+${q.options?.length ? `Options: ${q.options.map((o, i) => `${i}) ${o}`).join(', ')}\nCorrect answer: ${q.options[q.correctAnswer]}` : `Model answer: ${q.modelAnswer}`}
+
+Return ONLY valid JSON:
+{
+  "whyWrong": "One short sentence on why a student typically picks the wrong answer here.",
+  "correctConcept": "Two to three sentences clearly explaining the correct underlying concept, in simple language."
+}`;
+
+    let whyWrong = q.explanation || "";
+    let correctConcept = "";
+    try {
+      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 512, temperature: 0.5 });
+      whyWrong = parsed.whyWrong || whyWrong;
+      correctConcept = parsed.correctConcept || "";
+    } catch (aiErr) {
+      console.error("Tutor explain AI error:", aiErr.message);
+      if (!whyWrong) return res.status(500).json({ error: `AI tutor failed: ${aiErr.message}` });
+    }
+
+    q.explanation = whyWrong || q.explanation;
+    q.conceptNote = correctConcept || q.conceptNote;
+    await quiz.save();
+
+    res.json({ success: true, whyWrong: q.explanation, correctConcept: q.conceptNote, cached: false });
+  } catch (err) {
+    console.error("Tutor explain error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ==================== AI TUTOR: on-demand easier/harder practice question ====================
+// Ephemeral — not persisted. Lets a student immediately retry a lighter or
+// tougher version of the same topic right from the review screen.
+router.post("/:quizId/tutor-practice", auth, async (req, res) => {
+  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
+
+  try {
+    const quiz = await Quiz.findById(req.params.quizId);
+    if (!quiz) return res.status(404).json({ error: "Quiz not found" });
+    if (quiz.userId && quiz.userId.toString() !== req.user.userId && !quiz.isPublic) {
+      return res.status(403).json({ error: "Not authorized to view this quiz" });
+    }
+
+    const { questionIndex, difficulty } = req.body;
+    const q = quiz.questions[questionIndex];
+    if (!q) return res.status(400).json({ error: "Invalid questionIndex" });
+    if (!["easier", "harder"].includes(difficulty)) {
+      return res.status(400).json({ error: "difficulty must be 'easier' or 'harder'" });
+    }
+
+    const topic = q.topic || quiz.subject;
+    const prompt = `Create exactly ONE multiple-choice question on "${topic}" (part of ${quiz.subject}), ${
+      difficulty === "easier" ? "noticeably simpler than usual — rebuild the student's confidence" : "noticeably more challenging — push a student who just got it right"
+    }.
+
+Return ONLY valid JSON:
+{
+  "question": "...",
+  "options": ["A","B","C","D"],
+  "correctAnswer": 0,
+  "explanation": "One sentence."
+}`;
+
+    let parsed;
+    try {
+      parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 512, temperature: 0.7 });
+    } catch (aiErr) {
+      console.error("Tutor practice AI error:", aiErr.message);
+      return res.status(500).json({ error: `AI failed to generate a practice question: ${aiErr.message}` });
+    }
+
+    if (!parsed.question || !Array.isArray(parsed.options) || parsed.options.length < 2) {
+      return res.status(500).json({ error: "AI returned an invalid practice question" });
+    }
+
+    res.json({
+      success: true,
+      question: {
+        question: parsed.question,
+        options: parsed.options.slice(0, 4),
+        correctAnswer: typeof parsed.correctAnswer === "number" ? parsed.correctAnswer : 0,
+        explanation: parsed.explanation || "",
+        topic,
+      },
+    });
+  } catch (err) {
+    console.error("Tutor practice error:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -560,6 +681,19 @@ router.get("/sets", auth, async (req, res) => {
   }
 });
 
+// ==================== DELETE QUIZ SET ====================
+router.delete("/sets/:id", auth, async (req, res) => {
+  try {
+    const quiz = await Quiz.findOneAndDelete({ _id: req.params.id, userId: req.user.userId });
+    if (!quiz) return res.status(404).json({ error: "Quiz not found" });
+    await QuizResult.deleteMany({ quizId: req.params.id, userId: req.user.userId });
+    res.json({ success: true, message: "Quiz deleted" });
+  } catch (e) {
+    console.error("Delete quiz error:", e);
+    res.status(500).json({ error: "Failed to delete quiz" });
+  }
+});
+
 // ==================== SINGLE QUIZ ====================
 router.get("/:id", auth, async (req, res) => {
   try {
@@ -580,6 +714,21 @@ router.post("/quiz-results", auth, async (req, res) => {
     const quiz = await Quiz.findById(quizId);
     if (!quiz) return res.status(404).json({ error: "Quiz not found" });
 
+    // Per-question topic outcomes — feeds the adaptive learning engine so it
+    // can notice repeated mistakes on a specific sub-topic (not just subject).
+    const resolvedSubjectTag = resolveSpecificSubject(quiz.subject, quiz.title);
+    const topicBreakdown = quiz.questions.map((q, i) => {
+      const topic = (q.topic || "").trim() || resolvedSubjectTag;
+      let correct = null;
+      if (q.correctAnswer !== null && q.correctAnswer !== undefined) {
+        correct = (answers || [])[i] === q.correctAnswer;
+      } else {
+        const essayEntry = (essayAnswers || []).find(e => e.questionIndex === i);
+        if (essayEntry) correct = (essayEntry.aiScore ?? 0) >= 60;
+      }
+      return { questionIndex: i, subject: resolvedSubjectTag, topic, correct };
+    }).filter(t => t.correct !== null);
+
     const result = new QuizResult({
       userId: req.user.userId,
       quizId,
@@ -591,8 +740,18 @@ router.post("/quiz-results", auth, async (req, res) => {
       subjectTag: quiz.subject || "General",
       correctCount: correctCount ?? 0,
       totalCount: totalCount ?? (quiz.numQuestions || 0),
+      topicBreakdown,
     });
     await result.save();
+
+    // ── Adaptive learning: update topic mastery and auto-react to repeated misses ──
+    // Never blocks or fails the result save — adaptive learning is a bonus.
+    let adaptiveActions = [];
+    try {
+      adaptiveActions = await processQuizResult(req.user.userId, topicBreakdown);
+    } catch (adaptErr) {
+      console.error("Adaptive engine error (non-fatal):", adaptErr.message);
+    }
 
     // ── Auto-award XP for completing this quiz ──
     let xpAward = null;
@@ -632,6 +791,7 @@ router.post("/quiz-results", auth, async (req, res) => {
       success: true,
       message: "Quiz result saved successfully",
       xpAward: xpAward || null,
+      adaptiveActions,
     });
   } catch (e) {
     console.error("Save result error:", e);

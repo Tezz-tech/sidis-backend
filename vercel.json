@@ -10,5 +10,11 @@
     "server.js": {
       "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/adaptive/daily-sweep",
+      "schedule": "0 2 * * *"
+    }
+  ]
 }

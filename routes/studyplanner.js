@@ -282,7 +282,7 @@ Rules:
 Return ONLY valid JSON:
 {
   "questions": [
-    { "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "..." }
+    { "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "...", "topic": "specific sub-topic tested, e.g. 'Depreciation' not just the subject name" }
   ]
 }`;
     } else {
@@ -305,7 +305,7 @@ Rules:
 Return ONLY valid JSON:
 {
   "questions": [
-    { "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "..." }
+    { "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "...", "topic": "specific sub-topic tested, e.g. 'Depreciation' not just the subject name" }
   ]
 }`;
     }
@@ -335,6 +335,7 @@ Return ONLY valid JSON:
         correctAnswer: typeof q.correctAnswer === 'number' ? Math.min(q.correctAnswer, q.options.length - 1) : 0,
         modelAnswer:   '',
         explanation:   q.explanation || '',
+        topic:         q.topic || '',
       }));
 
     const quizTitle = `${subject} — ${plan.examName} (${sessionType === 'review' ? 'Revision' : 'Practice'})`;

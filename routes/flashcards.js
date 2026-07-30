@@ -60,7 +60,7 @@ router.post("/generate-flashcards", auth, async (req, res) => {
     const prompt = `You are an expert flashcard creator. Generate 12 high-quality flashcards from this content.
 Subject: ${subject || "General"}
 Return ONLY a valid JSON array, no markdown:
-[{"question":"...","answer":"..."},...]
+[{"question":"...","answer":"...","topic":"the specific sub-topic this card tests, e.g. 'Depreciation' not just 'Accounting'"},...]
 Content:
 ${safeText}`.trim();
 
@@ -81,7 +81,7 @@ ${safeText}`.trim();
     {  // keep scope for existing code below
 
     cards = cards
-      .map(c => ({ question: (c.question || "").trim(), answer: (c.answer || "").trim() }))
+      .map(c => ({ question: (c.question || "").trim(), answer: (c.answer || "").trim(), topic: (c.topic || "").trim() }))
       .filter(c => c.question && c.answer);
 
     if (cards.length === 0)
@@ -97,6 +97,7 @@ ${safeText}`.trim();
         question: c.question,
         answer: c.answer,
         masteryLevel: 0,
+        topic: c.topic || "",
       })),
     });
 

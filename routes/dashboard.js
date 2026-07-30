@@ -5,63 +5,11 @@ const auth = require('../middlewares/auth');
 const User = require('../models/User');
 const QuizResult = require('../models/QuizResult');
 const Quiz = require('../models/Quiz');
+const StudyPlan = require('../models/StudyPlan');
+const FlashcardSet = require('../models/FlashcardSet');
 
 const { gemini, capText } = require('../utils/ai');
-
-// ── Subject resolver ──────────────────────────────────────────────────────────
-// Maps a quiz title/subject to a specific academic topic so "General" is never
-// shown as the topic name in the Sid IQ profile.
-const SUBJECT_KEYWORDS = [
-  // STEM
-  ['Mathematics',     ['math', 'mathemat', 'calculus', 'algebra', 'geometry', 'trigonometry', 'arithmetic', 'number', 'equation', 'statistics', 'probability', 'maths']],
-  ['Calculus',        ['calculus', 'differential', 'integral', 'derivative', 'limit']],
-  ['Statistics',      ['statistic', 'probability', 'distribution', 'regression', 'hypothesis']],
-  ['Algebra',         ['algebra', 'polynomial', 'quadratic', 'linear equation']],
-  ['Biology',         ['biology', 'cell', 'genetics', 'evolution', 'ecology', 'organism', 'photosynthesis', 'mitosis', 'anatomy', 'physiology', 'microbiology']],
-  ['Chemistry',       ['chemistry', 'chemical', 'periodic', 'atom', 'molecule', 'reaction', 'organic', 'inorganic', 'compound', 'element', 'bonding']],
-  ['Physics',         ['physics', 'force', 'motion', 'energy', 'wave', 'optics', 'electricity', 'magnetism', 'quantum', 'mechanics', 'thermodynamic']],
-  ['Computer Science',['computer', 'programming', 'algorithm', 'data structure', 'software', 'coding', 'python', 'javascript', 'database', 'network', 'cybersecurity', 'machine learning', 'ai ', 'artificial intelligence']],
-  // Business & Finance
-  ['Accounting',      ['accounting', 'ledger', 'journal', 'debit', 'credit', 'balance sheet', 'income statement', 'audit', 'tax', 'bookkeeping', 'financial statement']],
-  ['Finance',         ['finance', 'investment', 'portfolio', 'stock', 'bond', 'market', 'valuation', 'asset', 'liability', 'capital', 'cash flow', 'banking']],
-  ['Economics',       ['economics', 'microeconom', 'macroeconom', 'supply', 'demand', 'gdp', 'inflation', 'fiscal', 'monetary policy', 'trade']],
-  ['Business Studies',['business', 'management', 'marketing', 'entrepreneur', 'strategy', 'organisation', 'operations', 'hrm', 'human resource']],
-  // Social Sciences
-  ['Psychology',      ['psychology', 'behaviour', 'behavior', 'cognitive', 'mental', 'freud', 'piaget', 'stimulus', 'response', 'therapy', 'emotion', 'personality']],
-  ['Sociology',       ['sociology', 'society', 'social structure', 'culture', 'institution', 'deviance', 'stratification', 'norms', 'values']],
-  ['Philosophy',      ['philosophy', 'ethics', 'logic', 'metaphysics', 'epistemology', 'plato', 'aristotle', 'kant', 'moral']],
-  ['History',         ['history', 'historical', 'war', 'revolution', 'empire', 'civilization', 'colonial', 'century', 'ancient', 'medieval', 'modern history']],
-  ['Geography',       ['geography', 'climate', 'continent', 'ecosystem', 'population', 'urbanization', 'map', 'physical geography', 'human geography']],
-  ['Political Science',['politic', 'government', 'democracy', 'constitution', 'election', 'parliament', 'legislation', 'policy', 'international relations']],
-  // Languages & Humanities
-  ['English',         ['english', 'grammar', 'comprehension', 'essay writing', 'literature', 'shakespeare', 'novel', 'poetry', 'prose', 'language arts']],
-  ['Literature',      ['literature', 'novel', 'short story', 'poetry', 'drama', 'theme', 'character', 'plot', 'symbolism']],
-  // Health & Medicine
-  ['Medicine',        ['medicine', 'medical', 'disease', 'diagnosis', 'pharmacology', 'pathology', 'clinical', 'drug', 'symptom', 'treatment']],
-  ['Nursing',         ['nursing', 'patient care', 'ward', 'clinical', 'nurse', 'healthcare', 'medication']],
-  ['Anatomy',         ['anatomy', 'bone', 'muscle', 'organ', 'tissue', 'skeletal', 'cardiovascular', 'nervous system']],
-  // Law
-  ['Law',             ['law', 'legal', 'contract', 'tort', 'criminal', 'constitution', 'court', 'statute', 'case study', 'judicial']],
-];
-
-function resolveSpecificSubject(subject, title) {
-  // If the saved subject is already specific, use it
-  if (subject && subject.trim() && subject.trim().toLowerCase() !== 'general') {
-    return subject.trim();
-  }
-  const text = ((subject || '') + ' ' + (title || '')).toLowerCase();
-  for (const [name, keywords] of SUBJECT_KEYWORDS) {
-    if (keywords.some(k => text.includes(k))) return name;
-  }
-  // Fall back to first 2–3 meaningful words from the title
-  const words = (title || '')
-    .replace(/[^a-zA-Z\s]/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(w => w.length > 3 && !['quiz', 'test', 'exam', 'chapter', 'unit', 'part', 'with', 'from', 'your', 'this', 'that'].includes(w.toLowerCase()));
-  if (words.length > 0) return words.slice(0, 2).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-  return 'General';
-}
+const { resolveSpecificSubject } = require('../utils/subjectResolver');
 
 // Build a quizId → specific-subject map for results tagged as "General"
 async function buildQuizSubjectMap(results) {
@@ -351,12 +299,67 @@ router.get('/sid-iq', auth, async (req, res) => {
     const uniqueDays = new Set(results.map(r => new Date(r.createdAt).toDateString())).size;
     const consistencyScore = Math.round((uniqueDays / daysSinceFirst) * 100);
     const streakBonus = Math.min(100, (user.currentStreak || 0) * 10);
+
+    // Study plan completion — nearest upcoming exam plan; neutral (50) if none yet
+    const activePlan = await StudyPlan.findOne({ userId, examDate: { $gt: today } })
+      .sort({ examDate: 1 }).lean();
+    const planTotal = activePlan?.schedule?.length || 0;
+    const planCompleted = activePlan?.schedule?.filter(s => s.completed).length || 0;
+    const planProgress = planTotal > 0 ? Math.round((planCompleted / planTotal) * 100) : 50;
+
+    // Flashcard mastery average across all of the user's sets; neutral (50) if none yet
+    const flashcardSets = await FlashcardSet.find({ userId }).select('cards').lean();
+    const allCards = flashcardSets.flatMap(s => s.cards || []);
+    const flashcardMastery = allCards.length > 0
+      ? Math.round(allCards.reduce((s, c) => s + (c.masteryLevel || 0), 0) / allCards.length)
+      : 50;
+
+    const READINESS_WEIGHTS = {
+      quizPerformance: 0.35,
+      accuracyTrend:   0.20,
+      consistency:     0.15,
+      streak:          0.10,
+      planProgress:    0.10,
+      flashcardMastery: 0.10,
+    };
     const examReadiness = Math.round(
-      0.4 * recentAvgScore +
-      0.3 * accuracyTrend +
-      0.2 * consistencyScore +
-      0.1 * streakBonus
+      READINESS_WEIGHTS.quizPerformance  * recentAvgScore +
+      READINESS_WEIGHTS.accuracyTrend    * accuracyTrend +
+      READINESS_WEIGHTS.consistency      * consistencyScore +
+      READINESS_WEIGHTS.streak           * streakBonus +
+      READINESS_WEIGHTS.planProgress     * planProgress +
+      READINESS_WEIGHTS.flashcardMastery * flashcardMastery
     );
+
+    const readinessBreakdown = [
+      { factor: 'Quiz performance',  value: Math.round(recentAvgScore),  weight: READINESS_WEIGHTS.quizPerformance },
+      { factor: 'Improvement trend', value: Math.round(accuracyTrend),   weight: READINESS_WEIGHTS.accuracyTrend },
+      { factor: 'Consistency',       value: consistencyScore,            weight: READINESS_WEIGHTS.consistency },
+      { factor: 'Streak',           value: streakBonus,                  weight: READINESS_WEIGHTS.streak },
+      { factor: 'Study plan progress', value: planProgress,              weight: READINESS_WEIGHTS.planProgress },
+      { factor: 'Flashcard mastery', value: flashcardMastery,            weight: READINESS_WEIGHTS.flashcardMastery },
+    ];
+
+    const reasonParts = [];
+    reasonParts.push(recentAvgScore >= 75
+      ? `a strong quiz average (${Math.round(recentAvgScore)}%)`
+      : recentAvgScore >= 55
+        ? `a moderate quiz average (${Math.round(recentAvgScore)}%)`
+        : `a low quiz average (${Math.round(recentAvgScore)}%)`);
+    if (activePlan) {
+      reasonParts.push(planProgress >= 70
+        ? `your study plan is ${planProgress}% complete`
+        : `your study plan is only ${planProgress}% complete`);
+    }
+    if (allCards.length > 0) {
+      reasonParts.push(`${flashcardMastery}% flashcard mastery`);
+    }
+    if (weakSubjects.length > 0) {
+      reasonParts.push(weakSubjects.length > 1
+        ? `${weakSubjects.length} weak subjects still need attention`
+        : `1 weak subject still needs attention`);
+    }
+    const readinessReason = `You're ${examReadiness}% ready: ${reasonParts.join(', ')}.`;
 
     // User's stated interest subjects (passed from the SidIQ frontend after profiling)
     const userInterests = req.query.interests
@@ -385,6 +388,8 @@ router.get('/sid-iq', auth, async (req, res) => {
     res.json({
       success: true,
       examReadiness,
+      readinessBreakdown,
+      readinessReason,
       subjectMastery,
       weakSubjects,
       strongSubjects,

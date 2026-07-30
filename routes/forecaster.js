@@ -211,8 +211,8 @@ Generate exactly 8 MCQ and 4 essay questions (12 total).
 Return ONLY valid JSON (no markdown, no extra text):
 {
   "questions": [
-    { "type": "mcq", "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "One sentence." },
-    { "type": "essay", "question": "...", "modelAnswer": "One sentence model answer." }
+    { "type": "mcq", "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "One sentence.", "topic": "specific sub-topic tested, e.g. 'Depreciation'" },
+    { "type": "essay", "question": "...", "modelAnswer": "One sentence model answer.", "topic": "specific sub-topic tested" }
   ]
 }
 
@@ -237,8 +237,8 @@ STRICT RULES:
 
     const quizQuestions = generated.map(q =>
       q.type === 'mcq'
-        ? { question: q.question, options: (q.options || []).slice(0, 4), correctAnswer: Number(q.correctAnswer) || 0, modelAnswer: '', explanation: q.explanation || '' }
-        : { question: q.question, options: [], correctAnswer: null, modelAnswer: q.modelAnswer || '', explanation: '' }
+        ? { question: q.question, options: (q.options || []).slice(0, 4), correctAnswer: Number(q.correctAnswer) || 0, modelAnswer: '', explanation: q.explanation || '', topic: q.topic || '' }
+        : { question: q.question, options: [], correctAnswer: null, modelAnswer: q.modelAnswer || '', explanation: '', topic: q.topic || '' }
     );
 
     const quiz = await Quiz.create({
