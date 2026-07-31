@@ -9,8 +9,7 @@ const auth          = require('../middlewares/auth');
 const Subscription  = require('../models/Subscription');
 const User          = require('../models/User');
 
-let sendEmail = null;
-try { sendEmail = require('../utils/nodemailer'); } catch (_) {}
+const sendEmail = require('../utils/email');
 
 const MAX_GROUP_MEMBERS = 2; // + the payer = 3 people, matching the plan's marketing copy
 
@@ -79,22 +78,37 @@ router.post('/invite', auth, async (req, res) => {
     await sub.save();
 
     const path = `/join-group/${inviteToken}`;
+    // req.headers.origin is reliably present here — this endpoint is always
+    // called cross-origin from the frontend SPA to the API, and browsers
+    // send Origin on cross-origin fetches. FRONTEND_URL is a manual fallback
+    // for any other caller (e.g. a script) that won't have that header.
+    const frontendOrigin = req.headers.origin || process.env.FRONTEND_URL || '';
+    const inviteLink = frontendOrigin ? `${frontendOrigin}${path}` : path;
 
-    let emailSent = false;
-    if (sendEmail) {
-      try {
-        await sendEmail({
-          to: email,
-          subject: `${payer.fullName} invited you to their Sidis ${sub.planName} plan`,
-          text: `${payer.fullName} has invited you to join their ${sub.planName} plan on Sidis.\n\nClick the link below to accept — you'll be able to sign up or log in:\n\n(open the Sidis app and go to) ${path}\n\nIf you weren't expecting this, you can ignore this email.`,
-        });
-        emailSent = true;
-      } catch (mailErr) {
-        console.warn('[group] invite email failed (non-fatal):', mailErr.message);
-      }
-    }
+    const { sent: emailSent, error: emailError } = await sendEmail({
+      to: email,
+      subject: `${payer.fullName} invited you to their Sidis ${sub.planName} plan`,
+      text: `${payer.fullName} has invited you to join their ${sub.planName} plan on Sidis.\n\nJoin here: ${inviteLink}\n\nIf you weren't expecting this, you can safely ignore this email.`,
+      html: `
+        <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px 24px;">
+          <h2 style="color:#f97316; margin-bottom: 8px;">You're invited to Sidis 🎓</h2>
+          <p style="color:#333; font-size:15px; line-height:1.5;">
+            <strong>${payer.fullName}</strong> has invited you to join their <strong>${sub.planName}</strong> plan.
+          </p>
+          <p style="margin: 28px 0;">
+            <a href="${inviteLink}" style="background: linear-gradient(90deg,#f97316,#ec4899); color:#fff; padding:14px 28px; border-radius:12px; text-decoration:none; font-weight:bold; display:inline-block;">
+              Join the Group →
+            </a>
+          </p>
+          <p style="color:#999; font-size:12px; line-height:1.5;">
+            If the button doesn't work, copy this link: ${inviteLink}<br/>
+            If you weren't expecting this, you can safely ignore this email.
+          </p>
+        </div>
+      `,
+    });
 
-    res.json({ success: true, path, emailSent });
+    res.json({ success: true, path, inviteLink, emailSent, emailError });
   } catch (err) {
     console.error('Invite error:', err);
     res.status(500).json({ error: 'Server error' });

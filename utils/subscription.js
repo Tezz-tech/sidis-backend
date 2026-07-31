@@ -13,6 +13,7 @@ const PLAN_FEATURES = {
     sidIQ:              false,
     sidIQMonthlyLimit:  0,
     adFree:             false,
+    tutorChatDailyLimit: 15,
   },
   exam_mode: {
     aiQuizzesPerMonth:  5,
@@ -24,6 +25,7 @@ const PLAN_FEATURES = {
     sidIQ:              false,
     sidIQMonthlyLimit:  0,
     adFree:             false,
+    tutorChatDailyLimit: 15,
   },
   weekly_individual: {
     aiQuizzesPerMonth:  Infinity,
@@ -35,6 +37,7 @@ const PLAN_FEATURES = {
     sidIQ:              false,
     sidIQMonthlyLimit:  0,
     adFree:             true,
+    tutorChatDailyLimit: Infinity,
   },
   weekly_group: {
     aiQuizzesPerMonth:  Infinity,
@@ -46,6 +49,7 @@ const PLAN_FEATURES = {
     sidIQ:              false,
     sidIQMonthlyLimit:  0,
     adFree:             true,
+    tutorChatDailyLimit: Infinity,
   },
   monthly_individual: {
     aiQuizzesPerMonth:  Infinity,
@@ -57,6 +61,7 @@ const PLAN_FEATURES = {
     sidIQ:              false,
     sidIQMonthlyLimit:  0,
     adFree:             true,
+    tutorChatDailyLimit: Infinity,
   },
   monthly_group: {
     aiQuizzesPerMonth:  Infinity,
@@ -68,6 +73,7 @@ const PLAN_FEATURES = {
     sidIQ:              true,
     sidIQMonthlyLimit:  1,
     adFree:             true,
+    tutorChatDailyLimit: Infinity,
   },
   yearly_individual: {
     aiQuizzesPerMonth:  Infinity,
@@ -79,6 +85,7 @@ const PLAN_FEATURES = {
     sidIQ:              false,
     sidIQMonthlyLimit:  0,
     adFree:             true,
+    tutorChatDailyLimit: Infinity,
   },
   yearly_group: {
     aiQuizzesPerMonth:  Infinity,
@@ -90,6 +97,7 @@ const PLAN_FEATURES = {
     sidIQ:              true,
     sidIQMonthlyLimit:  1,
     adFree:             true,
+    tutorChatDailyLimit: Infinity,
   },
 };
 

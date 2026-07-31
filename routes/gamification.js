@@ -5,6 +5,9 @@ const auth    = require('../middlewares/auth');
 const User    = require('../models/User');
 const QuizResult = require('../models/QuizResult');
 const Quiz    = require('../models/Quiz');
+const TopicMastery = require('../models/TopicMastery');
+const StudyPlan = require('../models/StudyPlan');
+const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
 const {
   BADGE_DEFS, LEVEL_THRESHOLDS, POWERUP_COSTS,
   getLevelInfo, checkNewBadges, awardXP,
@@ -668,6 +671,92 @@ router.post('/remove-ads', auth, async (req, res) => {
     });
   } catch (err) {
     console.error('Remove ads error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── POST /api/gamification/tutor-chat ────────────────────────────────────────
+// Real conversational AI tutor powering the StudyBuddy "Chat" tab. Grounds
+// every answer in the student's own data (recent scores, weak topics, active
+// study plan) so "why did I score low" / "what should I review next" get real
+// answers instead of generic advice. Chat history is passed in by the client
+// and not persisted server-side (kept intentionally simple/ephemeral).
+router.post('/tutor-chat', auth, async (req, res) => {
+  if (!gemini.ready) return res.status(503).json({ error: 'AI service unavailable' });
+
+  try {
+    const { message, history } = req.body;
+    if (!message || !message.trim()) return res.status(400).json({ error: 'message is required' });
+
+    const userId = req.user.userId;
+    const [planKey, user, results, weakTopics, plan] = await Promise.all([
+      getUserPlan(userId),
+      User.findById(userId).select('studyBuddyName xp level currentStreak tutorChatCount tutorChatCountDate'),
+      QuizResult.find({ userId }).sort({ createdAt: -1 }).limit(10).lean(),
+      TopicMastery.find({ userId, status: 'weak' }).sort({ masteryScore: 1 }).limit(5).lean(),
+      StudyPlan.findOne({ userId, examDate: { $gt: new Date() } }).sort({ examDate: 1 }).lean(),
+    ]);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Daily rate limit — free/exam_mode tiers only, paid tiers are unlimited.
+    const { tutorChatDailyLimit } = getPlanFeatures(planKey);
+    if (tutorChatDailyLimit !== Infinity) {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const lastCountDate = user.tutorChatCountDate ? new Date(user.tutorChatCountDate) : null;
+      if (lastCountDate) lastCountDate.setHours(0, 0, 0, 0);
+      const sameDay = lastCountDate && lastCountDate.getTime() === todayStart.getTime();
+      const usedToday = sameDay ? (user.tutorChatCount || 0) : 0;
+
+      if (usedToday >= tutorChatDailyLimit) {
+        return res.status(403).json({
+          error: `You've used all ${tutorChatDailyLimit} AI tutor messages for today. Upgrade your plan for unlimited chat.`,
+          limitReached: true,
+        });
+      }
+      await User.updateOne({ _id: userId }, { $set: { tutorChatCount: usedToday + 1, tutorChatCountDate: new Date() } });
+    }
+
+    const avgScore = results.length > 0
+      ? Math.round(results.reduce((s, r) => s + (r.score || 0), 0) / results.length)
+      : null;
+    const recentScoresStr = results.slice(0, 5).map(r => `${r.subjectTag || 'General'}: ${r.score}%`).join(', ') || 'no quizzes taken yet';
+    const weakStr = weakTopics.map(t => `${t.topic} (${t.subject}, ${t.masteryScore}% mastery)`).join(', ') || 'none identified yet';
+    const planStr = plan
+      ? `"${plan.examName}" on ${new Date(plan.examDate).toDateString()} — ${plan.schedule.filter(s => s.completed).length}/${plan.schedule.length} sessions done`
+      : 'no active study plan';
+
+    const historyText = Array.isArray(history)
+      ? history.slice(-6).map(h => `${h.role === 'user' ? 'Student' : 'Tutor'}: ${h.content}`).join('\n')
+      : '';
+
+    const prompt = `You are ${user?.studyBuddyName || 'Siddy'}, a friendly, encouraging personal AI tutor inside a study app called Sidis.
+
+Student context (ground your answer in this — don't ask for info you already have here):
+- Recent quiz scores: ${recentScoresStr}
+- Average score (last 10 quizzes): ${avgScore !== null ? avgScore + '%' : 'no data yet'}
+- Weakest topics: ${weakStr}
+- Current streak: ${user?.currentStreak || 0} days, Level ${user?.level || 1}, ${user?.xp || 0} XP
+- Active study plan: ${planStr}
+${historyText ? `\nRecent conversation:\n${historyText}\n` : ''}
+Student's new message: "${message.trim()}"
+
+Reply as their tutor — be specific and reference their real data above where relevant (e.g. if asked why they scored low, name a real weak topic; if asked what to review next, recommend one of their actual weak topics). If asked to generate a revision question, include one short question and its answer directly in your reply. Keep it conversational, under 120 words, no markdown headers.
+Return JSON: { "reply": "..." }`;
+
+    let reply;
+    try {
+      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 400, temperature: 0.7 });
+      reply = parsed.reply;
+    } catch (aiErr) {
+      console.error('Tutor chat AI error:', aiErr.message);
+      return res.status(500).json({ error: 'AI failed to respond. Try again.' });
+    }
+    if (!reply) return res.status(500).json({ error: 'AI returned an empty response.' });
+
+    res.json({ success: true, reply });
+  } catch (err) {
+    console.error('Tutor chat error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });

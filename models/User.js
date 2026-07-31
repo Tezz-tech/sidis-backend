@@ -49,6 +49,9 @@ const userSchema = new mongoose.Schema({
 
   // ── Study Buddy ───────────────────────────────────────
   studyBuddyName: { type: String, default: 'Siddy' },
+  // AI tutor chat daily rate limit (free/exam_mode tiers only — paid tiers are unlimited)
+  tutorChatCount:     { type: Number, default: 0 },
+  tutorChatCountDate: { type: Date,   default: null },
 
   // ── Discount Randomizer ───────────────────────────────
   discounts:    { type: mongoose.Schema.Types.Mixed, default: () => [] },

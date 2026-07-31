@@ -4,6 +4,8 @@ const router       = express.Router();
 const auth         = require('../middlewares/auth');
 const TopicMastery = require('../models/TopicMastery');
 const StudyPlan    = require('../models/StudyPlan');
+const QuizResult   = require('../models/QuizResult');
+const Quiz         = require('../models/Quiz');
 const {
   detectWeakPatterns, runAdaptiveCycle, needsAdaptiveAction,
 } = require('../utils/adaptiveEngine');
@@ -47,6 +49,62 @@ router.get('/insights', auth, async (req, res) => {
     res.json({ success: true, weakTopics, autoActions });
   } catch (err) {
     console.error('Adaptive insights error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── GET /api/adaptive/review-mistakes ─────────────────────────────────────────
+// The student's recent wrong MCQ answers, grouped by topic, so the dashboard's
+// action plan can say "Review 12 incorrect questions in Depreciation" with a
+// real count and link straight to them — no new data model, just re-joining
+// QuizResult.topicBreakdown against the source Quiz.questions.
+router.get('/review-mistakes', auth, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const results = await QuizResult.find({ userId, 'topicBreakdown.0': { $exists: true } })
+      .sort({ createdAt: -1 })
+      .limit(30)
+      .lean();
+
+    if (results.length === 0) return res.json({ success: true, topics: [], totalMistakes: 0 });
+
+    const quizIds = [...new Set(results.map(r => r.quizId?.toString()).filter(Boolean))];
+    const quizzes = await Quiz.find({ _id: { $in: quizIds } }).select('title questions').lean();
+    const quizMap = {};
+    for (const q of quizzes) quizMap[q._id.toString()] = q;
+
+    const byTopic = {};
+    for (const r of results) {
+      const quiz = quizMap[r.quizId?.toString()];
+      if (!quiz) continue;
+      for (const entry of r.topicBreakdown || []) {
+        if (entry.correct) continue;
+        const q = quiz.questions[entry.questionIndex];
+        if (!q) continue;
+        const key = entry.topic || entry.subject || 'General';
+        if (!byTopic[key]) byTopic[key] = { subject: entry.subject || 'General', topic: key, questions: [] };
+        if (byTopic[key].questions.length >= 10) continue; // cap per topic — keep the payload light
+        byTopic[key].questions.push({
+          quizId: r.quizId,
+          quizTitle: quiz.title,
+          questionIndex: entry.questionIndex,
+          question: q.question,
+          options: q.options,
+          correctAnswer: q.correctAnswer,
+          explanation: q.explanation || '',
+          answeredAt: r.createdAt,
+        });
+      }
+    }
+
+    const topics = Object.values(byTopic)
+      .map(t => ({ ...t, count: t.questions.length }))
+      .sort((a, b) => b.count - a.count);
+    const totalMistakes = topics.reduce((s, t) => s + t.count, 0);
+
+    res.json({ success: true, topics, totalMistakes });
+  } catch (err) {
+    console.error('Review mistakes error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
