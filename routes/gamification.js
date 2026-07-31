@@ -12,6 +12,8 @@ const {
   BADGE_DEFS, LEVEL_THRESHOLDS, POWERUP_COSTS,
   getLevelInfo, checkNewBadges, awardXP,
 } = require('../utils/gamificationUtils');
+const { Filter } = require('bad-words');
+const profanityFilter = new Filter();
 
 const { gemini } = require('../utils/ai');
 
@@ -100,13 +102,27 @@ router.post('/wager', auth, async (req, res) => {
     const user = await User.findById(req.user.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const wager = Math.max(0, Math.floor(Number(wagerAmount)));
-    if (wager > (user.xp || 0))
-      return res.status(400).json({ error: `Insufficient XP. You have ${user.xp || 0} XP.` });
+    // Refund any stale unresolved wager (e.g. the student abandoned that quiz
+    // without submitting a result) before placing a new one, so escrowed XP
+    // is never silently lost.
+    const existing = user.activeWager;
+    const refund = (existing && existing.wagerAmount > 0 && existing.quizId && existing.quizId.toString() !== quizId)
+      ? existing.wagerAmount
+      : 0;
 
+    const wager = Math.max(0, Math.floor(Number(wagerAmount)));
+    const availableXP = (user.xp || 0) + refund;
+    if (wager > availableXP)
+      return res.status(400).json({ error: `Insufficient XP. You have ${availableXP} XP.` });
+
+    // Escrow the wager immediately — it's a real bet from this point on,
+    // not just a promise resolved later against a balance that never moved.
     await User.updateOne(
       { _id: req.user.userId },
-      { $set: { activeWager: { quizId, wagerAmount: wager } } }
+      {
+        $inc: { xp: refund - wager },
+        $set: { activeWager: { quizId, wagerAmount: wager } },
+      }
     );
 
     res.json({ success: true, wager: { quizId, wagerAmount: wager } });
@@ -222,6 +238,8 @@ Return JSON: { "message": "..." }`;
       } catch (_) { /* AI optional — silently skip */ }
     }
 
+    const levelInfo = getLevelInfo(xp);
+
     res.json({
       success:      true,
       name:         buddyName,
@@ -230,6 +248,8 @@ Return JSON: { "message": "..." }`;
       studyTip,
       xp,
       level,
+      levelProgress: levelInfo.progress,
+      xpToNextLevel: levelInfo.xpToNext,
       streak,
       avgScore,
       quizzesTaken: taken,
@@ -456,6 +476,8 @@ router.post('/name-buddy', auth, async (req, res) => {
     const { name } = req.body;
     if (!name || name.trim().length < 1 || name.trim().length > 20)
       return res.status(400).json({ error: 'Name must be 1–20 characters' });
+    if (profanityFilter.isProfane(name.trim()))
+      return res.status(400).json({ error: 'That name isn\'t allowed — please choose a different one.' });
 
     const user = await User.findById(req.user.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });

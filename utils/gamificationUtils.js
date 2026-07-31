@@ -147,18 +147,24 @@ async function awardXP(user, results, { baseXP = 0, reason = '', score = null, t
   user.level      = levelInfo.level;
   const leveledUp = levelInfo.level > oldLevel;
 
-  // Wager resolution
+  // Wager resolution — the stake is already escrowed (deducted) at the time
+  // the wager was placed (see POST /gamification/wager), so this only ever
+  // needs to credit back a payout. A loss credits nothing further back
+  // (the stake stays forfeited); crediting a further negative here would
+  // double-deduct it.
   let wagerResult = null;
   const wager = user.activeWager;
   if (wager && wager.wagerAmount > 0 && quizId && wager.quizId && wager.quizId.toString() === quizId.toString()) {
-    let wagerXPChange = 0;
+    let wagerXPChange = 0;  // actually credited to user.xp now (post-escrow)
+    let netForDisplay = 0;  // net effect vs. the student's pre-wager balance
     let won           = false;
 
     if (score >= 95)      { wagerXPChange = Math.round(wager.wagerAmount * 3);   won = true; }
     else if (score >= 85) { wagerXPChange = Math.round(wager.wagerAmount * 2);   won = true; }
     else if (score >= 70) { wagerXPChange = Math.round(wager.wagerAmount * 1.5); won = true; }
-    else if (score >= 50) { wagerXPChange = wager.wagerAmount; /* break even */              }
-    else                  { wagerXPChange = -wager.wagerAmount;                              }
+    else if (score >= 50) { wagerXPChange = wager.wagerAmount; /* refund stake — true break-even */ }
+    else                  { wagerXPChange = 0; /* stake already forfeited via escrow */ }
+    netForDisplay = score < 50 ? -wager.wagerAmount : wagerXPChange;
 
     user.xp = Math.max(0, user.xp + wagerXPChange);
 
@@ -171,7 +177,7 @@ async function awardXP(user, results, { baseXP = 0, reason = '', score = null, t
 
     wagerResult = {
       wagerAmount: wager.wagerAmount,
-      xpChange:    wagerXPChange,
+      xpChange:    netForDisplay,
       won,
       multiplier:  won ? parseFloat((wagerXPChange / wager.wagerAmount).toFixed(1)) : null,
     };
