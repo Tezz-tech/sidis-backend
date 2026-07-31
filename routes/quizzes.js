@@ -289,6 +289,28 @@ Return a JSON OBJECT with this exact structure:
 
 ${isTopicOnly ? "" : `Text:\n${safeContent}`}
       `.trim();
+    } else if (questionType === "mixed") {
+      prompt = `
+You are an expert exam-paper setter creating a REALISTIC EXAM PAPER that mixes multiple-choice (objective) and short-answer/essay (theory) questions — exactly how a real exam in this subject is conventionally structured, not an arbitrary split.
+${needsSubjectInference ? `The content covers an academic topic — identify it.` : `Subject: ${resolvedSubject}`}
+Difficulty: ${difficulty}
+Total questions: ${numQuestions}
+${isTopicOnly ? `Topic: ${topic}` : `Based strictly on the provided text.`}
+
+Decide the objective-to-theory ratio yourself based on how exams in this subject are conventionally structured (e.g. mostly objective with a handful of theory questions for sciences/accounting/business-style subjects; more essay-weighted for literature/humanities/law-style subjects). Include at least one of each type when the total allows it.
+
+Return a JSON OBJECT with this exact structure:
+{
+  "subject": "${needsSubjectInference ? 'the specific academic subject (e.g. Accounting, Biology, Psychology — never use General)' : resolvedSubject}",
+  "questions": [
+    { "type": "mcq", "question": "Question text?", "options": ["Option A","Option B","Option C","Option D"], "correctAnswer": 0, "explanation": "Brief explanation.", "topic": "specific sub-topic" },
+    { "type": "essay", "question": "Theory question text?", "modelAnswer": "Comprehensive model answer.", "explanation": "Why this answer is correct.", "topic": "specific sub-topic" }
+  ]
+}
+Note: correctAnswer is the 0-based index of the correct option, and only applies to "mcq" questions.
+
+${isTopicOnly ? "" : `Text:\n${safeContent}`}
+      `.trim();
     } else {
       prompt = `
 You are a teacher creating a multiple-choice quiz.
@@ -350,6 +372,29 @@ ${isTopicOnly ? "" : `Text:\n${safeContent}`}
             topic: q.topic?.trim() || "",
           }))
           .filter(q => q.question && q.modelAnswer);
+      } else if (questionType === "mixed") {
+        questions = questions
+          .map(q => {
+            const isEssay = q.type === "essay" || !Array.isArray(q.options) || q.options.length < 2;
+            return isEssay
+              ? {
+                  question: q.question?.trim(),
+                  modelAnswer: q.modelAnswer?.trim() || "",
+                  explanation: q.explanation?.trim() || "",
+                  options: [],
+                  correctAnswer: null,
+                  topic: q.topic?.trim() || "",
+                }
+              : {
+                  question: q.question?.trim(),
+                  options: q.options.slice(0, 4),
+                  correctAnswer: Number(q.correctAnswer),
+                  explanation: q.explanation?.trim() || "",
+                  modelAnswer: "",
+                  topic: q.topic?.trim() || "",
+                };
+          })
+          .filter(q => q.question && (q.modelAnswer || (q.options.length === 4 && !isNaN(q.correctAnswer))));
       } else {
         questions = questions
           .map(q => ({
