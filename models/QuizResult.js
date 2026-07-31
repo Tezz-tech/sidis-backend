@@ -25,6 +25,8 @@ const quizResultSchema = new mongoose.Schema({
   subjectTag: { type: String, default: 'General' },
   correctCount: { type: Number, default: 0 },
   totalCount: { type: Number, default: 0 },
+  // True when the student wagered XP (enabled "Exam Mode") before this attempt.
+  examMode: { type: Boolean, default: false },
   // Per-question topic + correctness, used by the adaptive learning engine
   // to detect repeated weak spots at the sub-topic level (not just subject).
   topicBreakdown: { type: [topicOutcomeSchema], default: [] },

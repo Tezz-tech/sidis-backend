@@ -654,10 +654,14 @@ router.get("/question-bank", auth, async (req, res) => {
 router.get("/sets", auth, async (req, res) => {
   try {
     const quizzes = await Quiz.find({ userId: req.user.userId }).sort({ createdAt: -1 });
-    const results = await QuizResult.find({ userId: req.user.userId }).select("quizId score");
+    const results = await QuizResult.find({ userId: req.user.userId }).select("quizId score examMode");
 
     const map = {};
-    results.forEach(r => (map[r.quizId] = r.score));
+    const examModeMap = {};
+    results.forEach(r => {
+      map[r.quizId] = r.score;
+      examModeMap[r.quizId] = r.examMode || false;
+    });
 
     const formatted = quizzes.map(q => ({
       id: q._id,
@@ -672,6 +676,7 @@ router.get("/sets", auth, async (req, res) => {
       maxScore: 100,
       createdAt: q.createdAt,
       status: map[q._id] !== undefined ? "completed" : "pending",
+      examMode: examModeMap[q._id] ?? false,
     }));
 
     res.json({ success: true, quizzes: formatted });
@@ -760,6 +765,14 @@ router.post("/quiz-results", auth, async (req, res) => {
         const User = require("../models/User");
         const user = await User.findById(req.user.userId);
         if (user) {
+          // Was XP wagered ("Exam Mode") on this specific quiz? Check before
+          // awardXP resolves/clears the wager below.
+          const wager = user.activeWager;
+          if (wager && wager.wagerAmount > 0 && wager.quizId && wager.quizId.toString() === quizId.toString()) {
+            result.examMode = true;
+            await result.save();
+          }
+
           const baseXP = Math.round(10 + (score / 10));
           const allResults = await QuizResult.find({ userId: req.user.userId });
           xpAward = await awardXP(user, allResults, {
