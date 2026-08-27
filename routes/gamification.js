@@ -704,7 +704,7 @@ router.post('/remove-ads', auth, async (req, res) => {
 // answers instead of generic advice. Chat history is passed in by the client
 // and not persisted server-side (kept intentionally simple/ephemeral).
 router.post('/tutor-chat', auth, async (req, res) => {
-  if (!gemini.ready) return res.status(503).json({ error: 'AI service unavailable' });
+  if (!gemini.ready) return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
 
   try {
     const { message, history } = req.body;
@@ -721,14 +721,18 @@ router.post('/tutor-chat', auth, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     // Daily rate limit — free/exam_mode tiers only, paid tiers are unlimited.
+    // Only checked here; the counter is only incremented once a reply is
+    // actually generated below, so a failed/unavailable AI call never burns
+    // part of the student's daily quota for nothing.
     const { tutorChatDailyLimit } = getPlanFeatures(planKey);
+    let usedToday = 0;
     if (tutorChatDailyLimit !== Infinity) {
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
       const lastCountDate = user.tutorChatCountDate ? new Date(user.tutorChatCountDate) : null;
       if (lastCountDate) lastCountDate.setHours(0, 0, 0, 0);
       const sameDay = lastCountDate && lastCountDate.getTime() === todayStart.getTime();
-      const usedToday = sameDay ? (user.tutorChatCount || 0) : 0;
+      usedToday = sameDay ? (user.tutorChatCount || 0) : 0;
 
       if (usedToday >= tutorChatDailyLimit) {
         return res.status(403).json({
@@ -736,7 +740,6 @@ router.post('/tutor-chat', auth, async (req, res) => {
           limitReached: true,
         });
       }
-      await User.updateOne({ _id: userId }, { $set: { tutorChatCount: usedToday + 1, tutorChatCountDate: new Date() } });
     }
 
     const avgScore = results.length > 0
@@ -775,6 +778,10 @@ Return JSON: { "reply": "..." }`;
       return res.status(500).json({ error: 'AI failed to respond. Try again.' });
     }
     if (!reply) return res.status(500).json({ error: 'AI returned an empty response.' });
+
+    if (tutorChatDailyLimit !== Infinity) {
+      await User.updateOne({ _id: userId }, { $set: { tutorChatCount: usedToday + 1, tutorChatCountDate: new Date() } });
+    }
 
     res.json({ success: true, reply });
   } catch (err) {

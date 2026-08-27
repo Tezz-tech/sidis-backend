@@ -164,7 +164,12 @@ async function awardXP(user, results, { baseXP = 0, reason = '', score = null, t
     else if (score >= 70) { wagerXPChange = Math.round(wager.wagerAmount * 1.5); won = true; }
     else if (score >= 50) { wagerXPChange = wager.wagerAmount; /* refund stake — true break-even */ }
     else                  { wagerXPChange = 0; /* stake already forfeited via escrow */ }
-    netForDisplay = score < 50 ? -wager.wagerAmount : wagerXPChange;
+    // wagerXPChange is the GROSS credit (includes the stake being returned,
+    // since the stake was already deducted at escrow time) — the net change
+    // vs. the student's pre-wager balance is always that credit minus the
+    // stake they already lost from their balance, in every band including
+    // the loss band (0 credited - stake = -stake).
+    netForDisplay = wagerXPChange - wager.wagerAmount;
 
     user.xp = Math.max(0, user.xp + wagerXPChange);
 

@@ -28,6 +28,66 @@ function paystackHeaders() {
   return { Authorization: `Bearer ${(PAYSTACK_SECRET || '').trim()}`, 'Content-Type': 'application/json' };
 }
 
+// ── Shared verify-then-activate logic ─────────────────────────────────────────
+// A client reporting "payment succeeded" is not proof of payment — only
+// Paystack's own server-side transaction record is. This is the ONLY path
+// that may ever flip a subscription to 'active'; both /activate (the inline
+// popup flow) and /verify/:reference (the redirect flow) call into it so
+// there is exactly one place that performs real verification, not two paths
+// that can silently drift apart (one of which previously trusted the client
+// outright and let anyone activate any plan for free).
+async function verifyAndActivate(reference, userId) {
+  if (!PAYSTACK_SECRET) {
+    const err = new Error('Payment service not configured.');
+    err.httpStatus = 503;
+    throw err;
+  }
+
+  const sub = await Subscription.findOne({ paystackReference: reference, userId });
+  if (!sub) {
+    const err = new Error('Payment record not found.');
+    err.httpStatus = 404;
+    throw err;
+  }
+  if (sub.status === 'active') return { subscription: sub, alreadyActive: true };
+
+  const psRes = await axios.get(
+    `${PAYSTACK_BASE}/transaction/verify/${encodeURIComponent(reference)}`,
+    { headers: paystackHeaders() }
+  );
+  const tx = psRes.data?.data;
+  if (!psRes.data?.status || !tx) {
+    const err = new Error('Could not verify payment with Paystack.');
+    err.httpStatus = 502;
+    throw err;
+  }
+  if (tx.status !== 'success') {
+    const err = new Error(`Payment not completed. Status: ${tx.status}`);
+    err.httpStatus = 402;
+    throw err;
+  }
+  // Confirm the amount Paystack actually confirms was charged matches what
+  // this plan costs — without this, a tampered client could pay for a
+  // cheap plan and activate an expensive one against the same reference flow.
+  if (tx.amount !== sub.amount) {
+    const err = new Error('Payment amount does not match plan price.');
+    err.httpStatus = 402;
+    throw err;
+  }
+
+  const planConfig = PLANS[sub.plan];
+  const now        = new Date();
+  sub.status                = 'active';
+  sub.paystackTransactionId = String(tx.id);
+  sub.paystackCustomerCode  = tx.customer?.customer_code || '';
+  sub.startDate             = now;
+  sub.expiresAt             = new Date(now.getTime() + planConfig.durationDays * 86400 * 1000);
+  await sub.save();
+
+  console.log(`[payments] activated ${sub.planName} for user ${userId} until ${sub.expiresAt.toISOString()}`);
+  return { subscription: sub, alreadyActive: false };
+}
+
 // ── GET /api/payments/plans (public) ─────────────────────────────────────────
 router.get('/plans', (req, res) => {
   const out = Object.entries(PLANS).map(([key, p]) => ({
@@ -154,36 +214,20 @@ router.post('/prepare', auth, async (req, res) => {
 });
 
 // ── POST /api/payments/activate ───────────────────────────────────────────────
-// Called by frontend immediately after Paystack confirms success.
-// Activates the pending subscription without a server-side Paystack API call.
-// The Paystack webhook (below) remains as an independent safety net.
+// Called by frontend immediately after Paystack's popup reports success.
+// That client-side report is only a hint to check now — this still verifies
+// the transaction with Paystack's own server-side API before activating
+// anything. The webhook (below) remains as an independent, delayed safety net.
 router.post('/activate', auth, async (req, res) => {
   try {
     const { reference } = req.body;
     if (!reference) return res.status(400).json({ error: 'Reference required' });
 
-    const sub = await Subscription.findOne({
-      paystackReference: reference,
-      userId:            req.user.userId,
-    });
-    if (!sub) return res.status(404).json({ error: 'Payment record not found.' });
-
-    if (sub.status === 'active') {
-      return res.json({ success: true, subscription: sub, alreadyActive: true });
-    }
-
-    const planConfig = PLANS[sub.plan];
-    const now        = new Date();
-    sub.status    = 'active';
-    sub.startDate = now;
-    sub.expiresAt = new Date(now.getTime() + planConfig.durationDays * 86400 * 1000);
-    await sub.save();
-
-    console.log(`[payments] activated ${sub.planName} for user ${req.user.userId} until ${sub.expiresAt.toISOString()}`);
-    res.json({ success: true, subscription: sub });
+    const { subscription, alreadyActive } = await verifyAndActivate(reference, req.user.userId);
+    res.json({ success: true, subscription, alreadyActive });
   } catch (err) {
-    console.error('[payments] activate error:', err.message);
-    res.status(500).json({ error: err.message });
+    console.error('[payments] activate error:', err.response?.data || err.message);
+    res.status(err.httpStatus || 500).json({ error: err.response?.data?.message || err.message });
   }
 });
 
@@ -258,52 +302,11 @@ router.post('/initialize', auth, async (req, res) => {
 // ── POST /api/payments/verify/:reference ──────────────────────────────────────
 router.post('/verify/:reference', auth, async (req, res) => {
   try {
-    if (!PAYSTACK_SECRET)
-      return res.status(503).json({ error: 'Payment service not configured.' });
-
-    const { reference } = req.params;
-
-    // Check we have a pending record for this reference owned by this user
-    const sub = await Subscription.findOne({ paystackReference: reference, userId: req.user.userId });
-    if (!sub)
-      return res.status(404).json({ error: 'Payment record not found.' });
-
-    // Already verified
-    if (sub.status === 'active')
-      return res.json({ success: true, subscription: sub, alreadyActive: true });
-
-    // Call Paystack verify
-    const psRes = await axios.get(
-      `${PAYSTACK_BASE}/transaction/verify/${encodeURIComponent(reference)}`,
-      { headers: paystackHeaders() }
-    );
-
-    const tx = psRes.data?.data;
-    if (!psRes.data?.status || !tx)
-      return res.status(502).json({ error: 'Could not verify payment with Paystack.' });
-
-    if (tx.status !== 'success')
-      return res.status(402).json({ error: `Payment not completed. Status: ${tx.status}` });
-
-    // Activate subscription
-    const planConfig = PLANS[sub.plan];
-    const now        = new Date();
-    const expiresAt  = new Date(now.getTime() + planConfig.durationDays * 86400 * 1000);
-
-    sub.status                = 'active';
-    sub.paystackTransactionId = String(tx.id);
-    sub.paystackCustomerCode  = tx.customer?.customer_code || '';
-    sub.startDate             = now;
-    sub.expiresAt             = expiresAt;
-    await sub.save();
-
-    console.log(`[payments] Activated ${sub.planName} for user ${req.user.userId} until ${expiresAt.toISOString()}`);
-
-    res.json({ success: true, subscription: sub });
-
+    const { subscription, alreadyActive } = await verifyAndActivate(req.params.reference, req.user.userId);
+    res.json({ success: true, subscription, alreadyActive });
   } catch (err) {
     console.error('[payments] verify error:', err.response?.data || err.message);
-    res.status(500).json({ error: err.response?.data?.message || err.message });
+    res.status(err.httpStatus || 500).json({ error: err.response?.data?.message || err.message });
   }
 });
 

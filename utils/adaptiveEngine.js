@@ -26,16 +26,37 @@ function statusFor(masteryScore) {
 
 // ── Record outcomes from one quiz result into the per-topic ledger ──────────
 async function recordTopicOutcomes(userId, topicBreakdown) {
+  // consecutiveMisses tracks a pattern ACROSS ATTEMPTS (see TopicMastery model
+  // comment) — but a single quiz can have several questions on the same
+  // sub-topic, and that's still only one attempt. Aggregate per-topic first so
+  // one quiz with 2 wrong questions on the same topic can't fake two
+  // "consecutive" misses and fire the adaptive engine after a single sitting.
+  const topicAttemptCorrect = new Map();
+  for (const entry of topicBreakdown || []) {
+    const subject = (entry.subject || '').trim() || 'General';
+    const topic   = (entry.topic || '').trim() || subject;
+    const key = `${subject}::${topic}`;
+    const prev = topicAttemptCorrect.has(key) ? topicAttemptCorrect.get(key) : true;
+    topicAttemptCorrect.set(key, prev && !!entry.correct);
+  }
+
+  const consecutiveMissesApplied = new Set();
   const touched = [];
   for (const entry of topicBreakdown || []) {
     const subject = (entry.subject || '').trim() || 'General';
     const topic   = (entry.topic || '').trim() || subject;
+    const key = `${subject}::${topic}`;
 
     const existing = await TopicMastery.findOne({ userId, subject, topic });
     const timesSeen    = (existing?.timesSeen || 0) + 1;
     const timesCorrect = (existing?.timesCorrect || 0) + (entry.correct ? 1 : 0);
     const masteryScore = Math.round((timesCorrect / timesSeen) * 100);
-    const consecutiveMisses = entry.correct ? 0 : (existing?.consecutiveMisses || 0) + 1;
+
+    let consecutiveMisses = existing?.consecutiveMisses || 0;
+    if (!consecutiveMissesApplied.has(key)) {
+      consecutiveMissesApplied.add(key);
+      consecutiveMisses = topicAttemptCorrect.get(key) ? 0 : consecutiveMisses + 1;
+    }
 
     const doc = await TopicMastery.findOneAndUpdate(
       { userId, subject, topic },
@@ -196,8 +217,15 @@ async function runAdaptiveCycle(userId, subject, topic) {
 async function processQuizResult(userId, topicBreakdown) {
   try {
     const touched = await recordTopicOutcomes(userId, topicBreakdown);
+    // touched has one entry per QUESTION, so a quiz with several questions on
+    // the same topic returns that topic's doc more than once — dedupe before
+    // reacting, or the adaptive cycle (and its practice-quiz generation) runs
+    // more than once for the same topic from a single quiz result.
+    const uniqueByTopic = new Map();
+    for (const doc of touched) uniqueByTopic.set(`${doc.subject}::${doc.topic}`, doc);
+
     const actions = [];
-    for (const doc of touched) {
+    for (const doc of uniqueByTopic.values()) {
       if (needsAdaptiveAction(doc)) {
         const result = await runAdaptiveCycle(userId, doc.subject, doc.topic);
         actions.push(result);

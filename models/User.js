@@ -8,6 +8,13 @@ const userSchema = new mongoose.Schema({
   isAdmin:    { type: Boolean, default: false },
   createdAt:  { type: Date,   default: Date.now },
 
+  // ── Password reset ────────────────────────────────────
+  // Only the SHA-256 hash of the reset token is stored — never the raw
+  // token — so a database leak alone can't be used to reset anyone's
+  // password (the raw token only ever exists in the emailed link).
+  resetPasswordTokenHash: { type: String, default: null },
+  resetPasswordExpires:   { type: Date,   default: null },
+
   // ── Core stats (pre-existing) ─────────────────────────
   quizzesTaken:      { type: Number, default: 0 },
   totalScore:        { type: Number, default: 0 },

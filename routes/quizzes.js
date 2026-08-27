@@ -15,6 +15,7 @@ try { ({ awardXP } = require("../utils/gamificationUtils")); } catch (_) {}
 const { gemini, capText } = require("../utils/ai");
 const { resolveSpecificSubject } = require("../utils/subjectResolver");
 const { processQuizResult } = require("../utils/adaptiveEngine");
+const { computeAndSyncUserStats } = require("../utils/userStats");
 
 // AI is now handled by the shared utils/ai.js singleton (gemini)
 
@@ -46,10 +47,17 @@ router.post("/admin/create-manual", auth, async (req, res) => {
 
     const validQuestions = questions.filter(q => {
       if (!q.question || !q.question.trim()) return false;
-      if (questionType === "essay") return !!q.modelAnswer;
-      return Array.isArray(q.options) && q.options.length === 4 &&
+
+      const looksLikeMcq = Array.isArray(q.options) && q.options.length === 4 &&
         q.options.every(o => o && o.trim()) &&
         typeof q.correctAnswer === "number" && q.correctAnswer >= 0 && q.correctAnswer <= 3;
+      const looksLikeEssay = !!q.modelAnswer && q.modelAnswer.trim().length > 0;
+
+      if (questionType === "essay") return looksLikeEssay;
+      // "mixed" quizzes have a per-question type — a question is valid if it's
+      // a well-formed MCQ OR a well-formed essay question, not just MCQ.
+      if (questionType === "mixed") return looksLikeMcq || looksLikeEssay;
+      return looksLikeMcq;
     });
 
     if (validQuestions.length === 0) {
@@ -91,7 +99,7 @@ router.post("/admin/create-manual", auth, async (req, res) => {
 
 // ==================== AI QUIZ GENERATION (multi-source) ====================
 router.post("/generate-quiz", auth, async (req, res) => {
-  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service is temporarily unavailable. Please try again shortly." });
 
   // ── Subscription gate: enforce 5 AI quizzes/month for free + exam_mode users ──
   try {
@@ -444,7 +452,7 @@ ${isTopicOnly ? "" : `Text:\n${safeContent}`}
 
 // ==================== EVALUATE ESSAY ANSWER (AI grading) ====================
 router.post("/evaluate-essay", auth, async (req, res) => {
-  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service is temporarily unavailable. Please try again shortly." });
 
   try {
     const { question, userAnswer, modelAnswer } = req.body;
@@ -494,7 +502,7 @@ Return JSON ONLY:
 
 // ==================== GENERATE EXPLANATIONS for existing quiz ====================
 router.post("/generate-explanations/:quizId", auth, async (req, res) => {
-  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service is temporarily unavailable. Please try again shortly." });
 
   try {
     const quiz = await Quiz.findOne({ _id: req.params.quizId, userId: req.user.userId });
@@ -563,7 +571,7 @@ router.post("/:quizId/tutor-explain", auth, async (req, res) => {
       return res.json({ success: true, whyWrong: q.explanation, correctConcept: q.conceptNote, cached: true });
     }
 
-    if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
+    if (!gemini.ready) return res.status(503).json({ error: "AI service is temporarily unavailable. Please try again shortly." });
 
     const topic = q.topic || quiz.subject;
     const prompt = `You are a patient tutor helping a student who got this ${quiz.subject} question wrong (topic: ${topic}).
@@ -603,7 +611,7 @@ Return ONLY valid JSON:
 // Ephemeral — not persisted. Lets a student immediately retry a lighter or
 // tougher version of the same topic right from the review screen.
 router.post("/:quizId/tutor-practice", auth, async (req, res) => {
-  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service is temporarily unavailable. Please try again shortly." });
 
   try {
     const quiz = await Quiz.findById(req.params.quizId);
@@ -819,7 +827,7 @@ router.post("/quiz-results", auth, async (req, res) => {
           }
 
           const baseXP = Math.round(10 + (score / 10));
-          const allResults = await QuizResult.find({ userId: req.user.userId });
+          const allResults = await QuizResult.find({ userId: req.user.userId }).sort({ createdAt: -1 });
           xpAward = await awardXP(user, allResults, {
             baseXP,
             reason:    "quiz_complete",
@@ -828,6 +836,14 @@ router.post("/quiz-results", auth, async (req, res) => {
             timeLimit: quiz.timeLimit || 0,
             quizId:    quiz._id,
           });
+
+          // Keep the User doc's cached quiz stats (quizzesTaken, averageScore,
+          // accuracy, streak, etc.) in sync right away — several features
+          // (leaderboard, Profile page, streak-bonus XP, streak badges) read
+          // these fields directly off the User doc, but previously they were
+          // only refreshed when the user happened to load their own
+          // dashboard, silently going stale for everyone else in between.
+          await computeAndSyncUserStats(user, allResults);
         }
       }
     } catch (xpErr) {

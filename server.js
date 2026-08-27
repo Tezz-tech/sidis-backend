@@ -1,4 +1,9 @@
 // server.js  (or index.js)
+// Must run before any other require — several modules (utils/email.js among
+// them) read process.env at module-load time, not lazily inside a function,
+// so loading env vars any later can leave them permanently cached as unset.
+require('dotenv').config();
+
 const express = require('express');
 const connectDB = require('./config/db');
 const authRoutes = require('./routes/auth');
@@ -24,7 +29,6 @@ let groupRoutes = null;
 try { groupRoutes = require('./routes/group'); console.log('group routes: loaded'); } catch (e) { console.error('group load error:', e.message, e.stack); }
 const fileUpload = require('express-fileupload');
 const cors = require('cors');
-require('dotenv').config();
 
 const app = express();
 
@@ -76,22 +80,21 @@ app.use(
 // 4. Routes
 // -------------------------------------------------
 
-// Quick health check — no auth, no router, impossible to intercept
+// Quick health check — no auth, no router, impossible to intercept.
+// Routes through the shared AI client so this reflects the SAME
+// model/key failover the rest of the app uses, and never leaks provider
+// name, model name, or raw error text — only a clean ok/degraded/down status.
 app.get('/api/health', async (req, res) => {
-  const { GoogleGenerativeAI } = require('@google/generative-ai');
-  const keys = process.env.GEMINI_API_KEYS
-    ? process.env.GEMINI_API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
-    : [];
+  const { gemini } = require('./utils/ai');
 
-  let aiStatus = keys.length === 0 ? 'no keys set' : 'not tested';
-  if (keys.length > 0) {
+  let aiStatus = 'no keys configured';
+  if (gemini.ready) {
     try {
-      const genAI = new GoogleGenerativeAI(keys[0]);
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-      const r = await model.generateContent('Say: ok');
-      aiStatus = r.response.text().trim() ? 'ok' : 'responded but empty';
+      await gemini.generateText('Say: ok');
+      aiStatus = 'ok';
     } catch (e) {
-      aiStatus = e.message;
+      console.error('[health] AI check failed:', e.message);
+      aiStatus = 'degraded';
     }
   }
 
@@ -100,7 +103,7 @@ app.get('/api/health', async (req, res) => {
     try { require('pdf-parse'); pdfStatus = true; } catch (_2) {}
   }
 
-  res.json({ ai: aiStatus, pdfParse: pdfStatus, keys: keys.length });
+  res.json({ ai: aiStatus, pdfParse: pdfStatus, keys: gemini.keyCount });
 });
 
 app.use('/api/auth', authRoutes);

@@ -316,11 +316,8 @@ Return ONLY valid JSON:
       if (Array.isArray(parsed.questions)) generatedQuestions = parsed.questions;
     } catch (aiErr) {
       console.error('AI quiz error:', aiErr.message);
-      const isQuotaOrSuspended = /quota|rate.?limit|suspended|permission denied|403/i.test(aiErr.message || '');
       return res.status(503).json({
-        error: isQuotaOrSuspended
-          ? 'AI quota exceeded or key suspended. Please mark this session as done manually after studying, or contact support to update the API key.'
-          : 'Quiz generation temporarily failed. Please try again in a moment.',
+        error: 'AI is temporarily unavailable. Please mark this session as done manually after reviewing the subject, or try again later.',
       });
     }
 

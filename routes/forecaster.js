@@ -69,7 +69,7 @@ async function extractTextFromFiles(files) {
 
 // ── GET /api/forecaster/health (no auth) ─────────────────────────────────────
 router.get('/health', async (req, res) => {
-  let aiStatus = gemini.ready ? 'checking…' : 'not initialized — GEMINI_API_KEYS missing';
+  let aiStatus = gemini.ready ? 'checking…' : 'not initialized — no API keys configured';
   if (gemini.ready) {
     try {
       await gemini.generateJSON('Return exactly: {"ok":true}', { maxOutputTokens: 20 });
@@ -86,7 +86,7 @@ router.get('/health', async (req, res) => {
 router.post('/analyze', auth, requireForecasterAccess, async (req, res) => {
   try {
     if (!gemini.ready)
-      return res.status(503).json({ error: 'AI unavailable — GEMINI_API_KEYS not set in environment variables.' });
+      return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
 
     const examSubject = (req.body?.examSubject || '').trim();
     if (!examSubject)
@@ -195,7 +195,7 @@ RULES:
 router.post('/:forecastId/generate-mock-exam', auth, requireForecasterAccess, async (req, res) => {
   try {
     if (!gemini.ready)
-      return res.status(503).json({ error: 'AI unavailable — check GEMINI_API_KEYS.' });
+      return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
 
     const forecast = await ExamForecast.findOne({ _id: req.params.forecastId, userId: req.user.userId });
     if (!forecast)              return res.status(404).json({ error: 'Forecast not found.' });
@@ -264,18 +264,26 @@ STRICT RULES:
 // ── POST /api/forecaster/:forecastId/after-attempt ───────────────────────────
 router.post('/:forecastId/after-attempt', auth, async (req, res) => {
   try {
-    if (!gemini.ready) return res.status(503).json({ error: 'AI unavailable.' });
+    if (!gemini.ready) return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
 
-    const { score } = req.body;
+    const { score, regenerate } = req.body;
     const forecast = await ExamForecast.findOne({ _id: req.params.forecastId, userId: req.user.userId });
     if (!forecast) return res.status(404).json({ error: 'Forecast not found.' });
 
-    forecast.attempts++;
-    if (typeof score === 'number') forecast.lastScore = score;
+    // Only count this as a new mock-exam attempt when it actually is one.
+    // The frontend's "Regenerate" / "Generate AI Forecast" buttons call this
+    // same endpoint to re-run the AI forecast without a fresh attempt — they
+    // pass regenerate:true so the attempts counter shown in the UI doesn't
+    // get inflated by re-generating text alone.
+    if (!regenerate) {
+      forecast.attempts++;
+      if (typeof score === 'number') forecast.lastScore = score;
+    }
+    const effectiveScore = regenerate ? forecast.lastScore : score;
 
     const topTopics = (forecast.patterns || []).slice(0, 8).map(p => p.topic).join(', ');
     const forecastPrompt = `AI exam forecaster for ${forecast.examSubject}.
-Student mock score: ${score ?? 'unknown'}%. Top past-paper topics: ${topTopics}.
+Student mock score: ${effectiveScore ?? 'unknown'}%. Top past-paper topics: ${topTopics}.
 Analysis: ${forecast.analysisSummary || 'Not available.'}
 
 Predict the 5-8 most likely exam topics and give 3 preparation tips.

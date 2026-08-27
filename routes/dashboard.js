@@ -10,6 +10,7 @@ const FlashcardSet = require('../models/FlashcardSet');
 
 const { gemini, capText } = require('../utils/ai');
 const { resolveSpecificSubject } = require('../utils/subjectResolver');
+const { computeAndSyncUserStats } = require('../utils/userStats');
 
 // Build a quizId → specific-subject map for results tagged as "General"
 async function buildQuizSubjectMap(results) {
@@ -33,24 +34,6 @@ function getResultSubject(r, quizSubjectMap) {
   return (quizSubjectMap[r.quizId?.toString()] || 'General');
 }
 
-// Helper: check if two dates are on consecutive calendar days
-function isConsecutiveDay(date1, date2) {
-  const d1 = new Date(date1);
-  const d2 = new Date(date2);
-  d1.setHours(0, 0, 0, 0);
-  d2.setHours(0, 0, 0, 0);
-  const diff = Math.round((d2 - d1) / (1000 * 60 * 60 * 24));
-  return diff === 1;
-}
-
-function isSameDay(date1, date2) {
-  const d1 = new Date(date1);
-  const d2 = new Date(date2);
-  return d1.getFullYear() === d2.getFullYear() &&
-    d1.getMonth() === d2.getMonth() &&
-    d1.getDate() === d2.getDate();
-}
-
 router.get('/', auth, async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -62,49 +45,11 @@ router.get('/', auth, async (req, res) => {
 
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    const quizzesTaken = results.length;
-
-    const totalScore = results.reduce((sum, r) => sum + (r.score || 0), 0);
-    const averageScore = quizzesTaken > 0 ? Math.round(totalScore / quizzesTaken) : 0;
-
-    // accuracy = same as averageScore since score = (correct/total)*100
-    const accuracy = averageScore;
-
-    const hoursPracticed = results.reduce((sum, r) => sum + (r.timeSpent || 0), 0) / 3600;
-
-    // Streak logic
+    const {
+      quizzesTaken, averageScore, accuracy, hoursPracticed,
+      currentStreak, bestStreak, weeklyImprovement,
+    } = await computeAndSyncUserStats(user, results);
     const today = new Date();
-    let currentStreak = user.currentStreak || 0;
-    let bestStreak = user.bestStreak || 0;
-    const lastQuizDate = user.lastQuizDate || null;
-
-    if (quizzesTaken > 0) {
-      if (lastQuizDate) {
-        if (isSameDay(lastQuizDate, today)) {
-          // already counted today, streak stays
-        } else if (isConsecutiveDay(lastQuizDate, today)) {
-          currentStreak += 1;
-        } else {
-          currentStreak = 1; // streak broken
-        }
-      } else {
-        currentStreak = 1;
-      }
-
-      if (currentStreak > bestStreak) bestStreak = currentStreak;
-    }
-
-    // Weekly improvement: compare avg of last 5 vs previous 5
-    let weeklyImprovement = 0;
-    if (results.length >= 2) {
-      const recent = results.slice(0, Math.min(5, results.length));
-      const older = results.slice(Math.min(5, results.length), Math.min(10, results.length));
-      const recentAvg = recent.reduce((s, r) => s + r.score, 0) / recent.length;
-      const olderAvg = older.length > 0
-        ? older.reduce((s, r) => s + r.score, 0) / older.length
-        : recentAvg;
-      weeklyImprovement = Math.round(recentAvg - olderAvg);
-    }
 
     // Subject mastery — resolve "General" tags to specific academic subjects
     const quizSubjectMap = await buildQuizSubjectMap(results);
@@ -143,25 +88,6 @@ router.get('/', auth, async (req, res) => {
       0.1 * streakBonus
     );
 
-    // Update only the computed stats — use updateOne to bypass full-document
-    // validation (avoids Mongoose 8.x cast errors on gamification Mixed fields)
-    await User.updateOne(
-      { _id: userId },
-      {
-        $set: {
-          quizzesTaken,
-          averageScore,
-          totalScore,
-          accuracy,
-          hoursPracticed:    parseFloat(hoursPracticed.toFixed(1)),
-          currentStreak,
-          bestStreak,
-          weeklyImprovement,
-          lastQuizDate: results.length > 0 ? results[0].createdAt : (user.lastQuizDate || null),
-        },
-      }
-    );
-
     // GLOBAL RANKING — isolated so a DB hiccup here never kills the dashboard
     let myRank = null, totalUsers = 0, myPercentile = 0;
     try {
@@ -185,7 +111,7 @@ router.get('/', auth, async (req, res) => {
       quizzesTaken,
       averageScore,
       accuracy,
-      hoursPracticed: parseFloat(hoursPracticed.toFixed(1)),
+      hoursPracticed,
       currentStreak,
       bestStreak,
       weeklyImprovement,
@@ -368,21 +294,49 @@ router.get('/sid-iq', auth, async (req, res) => {
 
     // Recommended quizzes — weak subjects take priority; fall back to interests; then random public
     const searchSubjects = weakSubjects.length > 0 ? weakSubjects : userInterests;
-    const recommendedQuizzes = searchSubjects.length > 0
+    let recommendedQuizzes = searchSubjects.length > 0
       ? await Quiz.find({
           subject: { $in: searchSubjects.map(s => new RegExp(s, 'i')) },
           isPublic: true
         }).limit(6).select('title subject numQuestions difficulty').lean()
-      : await Quiz.find({ isPublic: true }).limit(6).select('title subject numQuestions difficulty').lean();
+      : [];
+    // No quizzes exist yet for those subjects — show popular public quizzes
+    // instead of leaving the "Recommended for You" section empty.
+    const matchedSearchSubjects = recommendedQuizzes.length > 0;
+    if (recommendedQuizzes.length === 0) {
+      recommendedQuizzes = await Quiz.find({ isPublic: true }).limit(6).select('title subject numQuestions difficulty').lean();
+    }
 
-    // AI study tip
+    // AI study tip — deterministic text is the fallback used when AI is
+    // unavailable or the call fails; when AI is up, it's replaced with a real
+    // tip generated from this student's actual data.
     let studyTip = "Keep practicing consistently to boost your exam readiness score!";
     if (weakSubjects.length > 0) {
       studyTip = `Focus on ${weakSubjects.join(', ')} — these are your weakest areas. Spending 20 minutes daily on targeted practice in these subjects can improve your score significantly.`;
-    } else if (userInterests.length > 0) {
+    } else if (userInterests.length > 0 && matchedSearchSubjects) {
       studyTip = `Here are some ${userInterests.slice(0, 3).join(', ')} quizzes based on your interests. Complete them to start building your Sid IQ profile!`;
     } else if (strongSubjects.length > 0) {
       studyTip = `Great work on ${strongSubjects.join(', ')}! Maintain your momentum and challenge yourself with harder difficulty levels.`;
+    }
+
+    if (gemini.ready && quizzesTaken > 0) {
+      try {
+        const tipPrompt = `You are an encouraging, specific study coach. Write ONE study tip for this student based on their real data below — plain text, no markdown, max 35 words, speak directly to them ("you").
+
+Exam readiness: ${examReadiness}%
+Quizzes taken: ${quizzesTaken}
+Current streak: ${user.currentStreak || 0} days
+Subject mastery: ${Object.entries(subjectMastery).map(([s, v]) => `${s} ${v}%`).join(', ') || 'no data yet'}
+Weak subjects: ${weakSubjects.length > 0 ? weakSubjects.join(', ') : 'none'}
+Strong subjects: ${strongSubjects.length > 0 ? strongSubjects.join(', ') : 'none'}
+${userInterests.length > 0 ? `Stated interests: ${userInterests.join(', ')}` : ''}
+
+Return ONLY valid JSON: { "tip": "..." }`;
+        const parsed = await gemini.generateJSON(tipPrompt, { maxOutputTokens: 150 });
+        if (parsed.tip && parsed.tip.trim()) studyTip = parsed.tip.trim();
+      } catch (_) {
+        // keep the deterministic fallback tip computed above
+      }
     }
 
     res.json({

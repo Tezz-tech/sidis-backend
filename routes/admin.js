@@ -628,7 +628,7 @@ router.get("/activity-logs", async (req, res) => {
 
 // ==================== ADMIN AI: Generate Quiz ====================
 router.post("/quizzes/generate", async (req, res) => {
-  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service is temporarily unavailable. Please try again shortly." });
 
   try {
     const { title = "Untitled Quiz", subject = "General", numQuestions = 15, difficulty = "medium", timeLimit = 30, content } = req.body;
@@ -701,7 +701,7 @@ router.post("/quizzes/generate", async (req, res) => {
 
 // ==================== ADMIN AI: Generate Flashcards ====================
 router.post("/flashcards/generate", async (req, res) => {
-  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service is temporarily unavailable. Please try again shortly." });
 
   try {
     const { title = "Untitled Flashcards", subject = "General", content } = req.body;

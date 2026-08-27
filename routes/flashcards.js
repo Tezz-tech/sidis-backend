@@ -3,6 +3,7 @@ const express = require("express");
 const router = express.Router();
 const auth = require("../middlewares/auth");
 const FlashcardSet = require("../models/FlashcardSet");
+const FlashcardProgress = require("../models/FlashcardProgress");
 const PDFParser = require("pdf2json");
 require("dotenv").config();
 
@@ -10,7 +11,7 @@ const { gemini, capText } = require("../utils/ai");
 
 // ==================== GENERATE FLASHCARDS (PDF OR TEXT) ====================
 router.post("/generate-flashcards", auth, async (req, res) => {
-  if (!gemini.ready) return res.status(503).json({ error: "AI service unavailable — check GEMINI_API_KEYS" });
+  if (!gemini.ready) return res.status(503).json({ error: "AI service is temporarily unavailable. Please try again shortly." });
 
   try {
     const { title, subject, content } = req.body;
@@ -139,6 +140,7 @@ router.post("/create-flashcards-manual", auth, async (req, res) => {
         question: c.question.trim(),
         answer: c.answer.trim(),
         masteryLevel: 0,
+        topic: c.topic?.trim() || "",
       })),
     });
 
@@ -266,8 +268,6 @@ router.post("/sets/:id/study", auth, async (req, res) => {
   }
 });
 
-const FlashcardProgress = require("../models/FlashcardProgress"); // <-- new model file
-
 // ==================== PUBLIC FLASHCARD ROUTES ====================
 
 /* ============================================================== */
@@ -366,7 +366,7 @@ router.get("/public/sets", async (req, res) => {  // Removed: auth
 // PUBLIC: Get set with user progress
 router.get("/public/sets/:id", async (req, res) => {
   try {
-    const set = await FlashcardSet.findById(req.params.id).lean();
+    const set = await FlashcardSet.findById(req.params.id).populate("userId", "fullName").lean();
     if (!set) return res.status(404).json({ success: false, error: "Not found" });
 
     let cardsWithProgress = [...set.cards];
@@ -423,10 +423,15 @@ router.post("/public/sets/:id/study", auth, async (req, res) => {
 
     const delta = known ? 20 : -15;
 
+    // $inc alone already gives the right behavior on upsert — Mongo creates
+    // the field starting from 0 when the document doesn't exist yet, so
+    // there's no need for a separate $setOnInsert here. Combining
+    // $setOnInsert and $inc on the SAME field is rejected by MongoDB outright
+    // (ConflictingUpdateOperators, error code 40) — every study action on a
+    // shared/public set was failing because of this.
     const progress = await FlashcardProgress.findOneAndUpdate(
       { userId: req.user.userId, setId, cardId },
       {
-        $setOnInsert: { masteryLevel: 0 },
         $inc: { masteryLevel: delta },
         $set: { lastStudied: new Date() }
       },
