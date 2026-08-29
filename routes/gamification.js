@@ -12,8 +12,27 @@ const {
   BADGE_DEFS, LEVEL_THRESHOLDS, POWERUP_COSTS,
   getLevelInfo, checkNewBadges, awardXP,
 } = require('../utils/gamificationUtils');
-const { Filter } = require('bad-words');
-const profanityFilter = new Filter();
+// bad-words@4.x ships ESM-only ("type":"module" in its own package.json) —
+// a top-level `require('bad-words')` throws on any Node runtime without
+// require()-of-ESM interop (which includes Vercel's production runtime),
+// and since that require ran at module load time, it silently took down
+// EVERY route in this file, not just name-buddy, in every deployment that
+// runs this code. Dynamic import() is Node's own recommended way to consume
+// an ESM-only package from CommonJS — it works regardless of target module
+// format — so this loads it lazily instead, cached after first success, and
+// name-buddy simply skips the profanity check (never blocks) if it fails.
+let profanityFilterPromise = null;
+function getProfanityFilter() {
+  if (!profanityFilterPromise) {
+    profanityFilterPromise = import('bad-words')
+      .then(({ Filter }) => new Filter())
+      .catch(err => {
+        console.error('[gamification] Failed to load profanity filter:', err.message);
+        return null;
+      });
+  }
+  return profanityFilterPromise;
+}
 
 const { gemini } = require('../utils/ai');
 
@@ -476,7 +495,8 @@ router.post('/name-buddy', auth, async (req, res) => {
     const { name } = req.body;
     if (!name || name.trim().length < 1 || name.trim().length > 20)
       return res.status(400).json({ error: 'Name must be 1–20 characters' });
-    if (profanityFilter.isProfane(name.trim()))
+    const profanityFilter = await getProfanityFilter();
+    if (profanityFilter?.isProfane(name.trim()))
       return res.status(400).json({ error: 'That name isn\'t allowed — please choose a different one.' });
 
     const user = await User.findById(req.user.userId);
