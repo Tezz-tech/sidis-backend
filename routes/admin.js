@@ -7,20 +7,20 @@ const QuizResult = require("../models/QuizResult");
 const FlashcardSet = require("../models/FlashcardSet");
 const ActivityLog = require("../models/ActivityLog");
 const Subscription = require("../models/Subscription");
-const PDFParser = require("pdf2json");
+const { extractPdfText, pdfParseAvailable } = require("../utils/pdfExtract");
 const mammoth = require("mammoth");
 
 require("dotenv").config();
 const { gemini, capText } = require("../utils/ai");
 
 const PLAN_CONFIG = {
-  exam_mode:          { name: 'Exam Mode',          amount: 700000,  durationDays: 3650 },
-  weekly_individual:  { name: 'Weekly Individual',  amount: 550000,  durationDays: 7    },
-  weekly_group:       { name: 'Weekly Group',       amount: 270000,  durationDays: 7    },
-  monthly_individual: { name: 'Monthly Individual', amount: 1500000, durationDays: 30   },
-  monthly_group:      { name: 'Monthly Group',      amount: 333400,  durationDays: 30   },
-  yearly_individual:  { name: 'Yearly Individual',  amount: 5000000, durationDays: 365  },
-  yearly_group:       { name: 'Yearly Group',       amount: 833300,  durationDays: 365  },
+  exam_mode:          { name: 'Exam Mode',          amount: 725000,  durationDays: 3650 },
+  weekly_individual:  { name: 'Weekly Individual',  amount: 575000,  durationDays: 7    },
+  weekly_group:       { name: 'Weekly Group',       amount: 295000,  durationDays: 7    },
+  monthly_individual: { name: 'Monthly Individual', amount: 1525000, durationDays: 30   },
+  monthly_group:      { name: 'Monthly Group',      amount: 358400,  durationDays: 30   },
+  yearly_individual:  { name: 'Yearly Individual',  amount: 5025000, durationDays: 365  },
+  yearly_group:       { name: 'Yearly Group',       amount: 858300,  durationDays: 365  },
 };
 
 // ==================== USERS MANAGEMENT ====================
@@ -643,17 +643,8 @@ router.post("/quizzes/generate", async (req, res) => {
       if (file.size > 12 * 1024 * 1024) return res.status(400).json({ error: "File must be under 12MB" });
 
       if (file.mimetype === "application/pdf") {
-        const pdfParser = new PDFParser();
-        const data = await new Promise((resolve, reject) => {
-          pdfParser.on("pdfParser_dataError", reject);
-          pdfParser.on("pdfParser_dataReady", resolve);
-          pdfParser.parseBuffer(file.data);
-        });
-        for (const page of data.Pages) {
-          for (const text of page.Texts) {
-            try { extractedText += decodeURIComponent(text.R[0].T) + " "; } catch { extractedText += " "; }
-          }
-        }
+        if (!pdfParseAvailable()) return res.status(503).json({ error: "PDF parser unavailable on this server." });
+        extractedText += await extractPdfText(file.data);
       } else {
         const result = await mammoth.extractRawText({ buffer: file.data });
         extractedText = result.value;
@@ -714,17 +705,8 @@ router.post("/flashcards/generate", async (req, res) => {
       if (pdfFile.mimetype !== "application/pdf") return res.status(400).json({ error: "Only PDF allowed" });
       if (pdfFile.size > 5 * 1024 * 1024) return res.status(400).json({ error: "PDF must be under 5MB" });
 
-      const pdfParser = new PDFParser();
-      const data = await new Promise((resolve, reject) => {
-        pdfParser.on("pdfParser_dataError", reject);
-        pdfParser.on("pdfParser_dataReady", resolve);
-        pdfParser.parseBuffer(pdfFile.data);
-      });
-      for (const page of data.Pages) {
-        for (const text of page.Texts) {
-          try { extractedText += decodeURIComponent(text.R[0].T) + " "; } catch { extractedText += " "; }
-        }
-      }
+      if (!pdfParseAvailable()) return res.status(503).json({ error: "PDF parser unavailable on this server." });
+      extractedText += await extractPdfText(pdfFile.data);
     } else {
       return res.status(400).json({ error: "Provide content or PDF" });
     }

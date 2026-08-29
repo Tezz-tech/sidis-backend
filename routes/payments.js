@@ -15,13 +15,13 @@ const PAYSTACK_BASE   = 'https://api.paystack.co';
 
 // ── Plan catalogue ────────────────────────────────────────────────────────────
 const PLANS = {
-  exam_mode:          { name: 'Exam Mode',          amount: 700000,   durationDays: 3650, isGroup: false },
-  weekly_individual:  { name: 'Weekly Individual',  amount: 550000,   durationDays: 7,    isGroup: false },
-  weekly_group:       { name: 'Weekly Group',        amount: 270000,   durationDays: 7,    isGroup: true  },
-  monthly_individual: { name: 'Monthly Individual', amount: 1500000,  durationDays: 30,   isGroup: false },
-  monthly_group:      { name: 'Monthly Group',       amount: 333400,   durationDays: 30,   isGroup: true  },
-  yearly_individual:  { name: 'Yearly Individual',  amount: 5000000,  durationDays: 365,  isGroup: false },
-  yearly_group:       { name: 'Yearly Group',        amount: 833300,   durationDays: 365,  isGroup: true  },
+  exam_mode:          { name: 'Exam Mode',          amount: 725000,   durationDays: 3650, isGroup: false },
+  weekly_individual:  { name: 'Weekly Individual',  amount: 575000,   durationDays: 7,    isGroup: false },
+  weekly_group:       { name: 'Weekly Group',        amount: 295000,   durationDays: 7,    isGroup: true  },
+  monthly_individual: { name: 'Monthly Individual', amount: 1525000,  durationDays: 30,   isGroup: false },
+  monthly_group:      { name: 'Monthly Group',       amount: 358400,   durationDays: 30,   isGroup: true  },
+  yearly_individual:  { name: 'Yearly Individual',  amount: 5025000,  durationDays: 365,  isGroup: false },
+  yearly_group:       { name: 'Yearly Group',        amount: 858300,   durationDays: 365,  isGroup: true  },
 };
 
 function paystackHeaders() {

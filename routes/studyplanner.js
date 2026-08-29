@@ -7,6 +7,7 @@ const Quiz      = require('../models/Quiz');
 const QuizResult = require('../models/QuizResult');
 
 const { gemini, capText } = require('../utils/ai');
+const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -195,14 +196,9 @@ router.post('/:planId/subject-material', auth, async (req, res) => {
     let fileName      = '';
 
     if (req.files?.pdf) {
-      let pdfParse;
-      try { pdfParse = require('pdf-parse/lib/pdf-parse.js'); } catch (_) {
-        try { pdfParse = require('pdf-parse'); } catch (_2) {}
-      }
-      if (!pdfParse) return res.status(503).json({ error: 'PDF parser unavailable on this server.' });
+      if (!pdfParseAvailable()) return res.status(503).json({ error: 'PDF parser unavailable on this server.' });
       try {
-        const parsed = await pdfParse(req.files.pdf.data);
-        extractedText = (parsed.text || '').trim();
+        extractedText = (await extractPdfText(req.files.pdf.data)).trim();
         fileName      = req.files.pdf.name || 'document.pdf';
         if (!extractedText)
           return res.status(422).json({ error: 'No text found in PDF. Use a text-based PDF or paste notes instead.' });

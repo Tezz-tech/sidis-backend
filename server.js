@@ -27,6 +27,8 @@ let collaborationRoutes = null;
 try { collaborationRoutes = require('./routes/collaboration'); console.log('collaboration routes: loaded'); } catch (e) { console.error('collaboration load error:', e.message, e.stack); }
 let groupRoutes = null;
 try { groupRoutes = require('./routes/group'); console.log('group routes: loaded'); } catch (e) { console.error('group load error:', e.message, e.stack); }
+let catchupRoutes = null;
+try { catchupRoutes = require('./routes/catchup'); console.log('catchup routes: loaded'); } catch (e) { console.error('catchup load error:', e.message, e.stack); }
 const fileUpload = require('express-fileupload');
 const cors = require('cors');
 
@@ -136,6 +138,7 @@ if (paymentRoutes)       app.use('/api/payments',      paymentRoutes);
 if (adaptiveRoutes)      app.use('/api/adaptive',      adaptiveRoutes);
 if (collaborationRoutes) app.use('/api/collaboration', collaborationRoutes);
 if (groupRoutes)         app.use('/api/group',         groupRoutes);
+if (catchupRoutes)       app.use('/api/catchup',       catchupRoutes);
 
 // -------------------------------------------------
 // 5. JSON 404 for any unmatched route (so CORS headers are always present)

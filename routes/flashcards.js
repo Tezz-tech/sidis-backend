@@ -4,7 +4,7 @@ const router = express.Router();
 const auth = require("../middlewares/auth");
 const FlashcardSet = require("../models/FlashcardSet");
 const FlashcardProgress = require("../models/FlashcardProgress");
-const PDFParser = require("pdf2json");
+const { extractPdfText, pdfParseAvailable } = require("../utils/pdfExtract");
 require("dotenv").config();
 
 const { gemini, capText } = require("../utils/ai");
@@ -32,22 +32,8 @@ router.post("/generate-flashcards", auth, async (req, res) => {
         return res.status(400).json({ error: "PDF must be under 5MB" });
       }
 
-      const pdfParser = new PDFParser();
-      const pdfData = await new Promise((resolve, reject) => {
-        pdfParser.on("pdfParser_dataError", reject);
-        pdfParser.on("pdfParser_dataReady", resolve);
-        pdfParser.parseBuffer(pdfFile.data);
-      });
-
-      for (const page of pdfData.Pages) {
-        for (const text of page.Texts) {
-          try {
-            extractedText += decodeURIComponent(text.R[0].T) + " ";
-          } catch (e) {
-            extractedText += " ";
-          }
-        }
-      }
+      if (!pdfParseAvailable()) return res.status(503).json({ error: "PDF parser unavailable on this server. Please paste your notes as text instead." });
+      extractedText = await extractPdfText(pdfFile.data);
     } else {
       return res.status(400).json({ error: "Please provide either pasted text or upload a PDF" });
     }

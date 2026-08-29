@@ -4,7 +4,7 @@ const router = express.Router();
 const auth = require("../middlewares/auth");
 const Quiz = require("../models/Quiz");
 const QuizResult = require("../models/QuizResult");
-const PDFParser = require("pdf2json");
+const { extractPdfText: extractPdfTextShared, pdfParseAvailable } = require("../utils/pdfExtract");
 const mammoth = require("mammoth");
 require("dotenv").config();
 
@@ -21,19 +21,8 @@ const { computeAndSyncUserStats } = require("../utils/userStats");
 
 // ==================== HELPER: extract text from PDF buffer ====================
 async function extractPdfText(buffer) {
-  const pdfParser = new PDFParser();
-  const data = await new Promise((resolve, reject) => {
-    pdfParser.on("pdfParser_dataError", reject);
-    pdfParser.on("pdfParser_dataReady", resolve);
-    pdfParser.parseBuffer(buffer);
-  });
-  let text = "";
-  for (const page of data.Pages) {
-    for (const t of page.Texts) {
-      try { text += decodeURIComponent(t.R[0].T) + " "; } catch { text += " "; }
-    }
-  }
-  return text;
+  if (!pdfParseAvailable()) throw new Error("PDF parser is not available on this server. Please paste the content as text instead.");
+  return extractPdfTextShared(buffer);
 }
 
 // ==================== MANUAL QUIZ CREATION (ADMIN) ====================

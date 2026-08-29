@@ -25,12 +25,9 @@ async function requireForecasterAccess(req, res, next) {
   }
 }
 
-// ── PDF parser (try lib path first to skip v2 test-fixture; fall back to main) ─
-let pdfParse = null;
-try       { pdfParse = require('pdf-parse/lib/pdf-parse.js'); }
-catch (_) { try { pdfParse = require('pdf-parse'); } catch (_2) {} }
+const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
 
-console.log('[forecaster] pdfParse:', pdfParse ? 'loaded' : 'UNAVAILABLE');
+console.log('[forecaster] pdfParse:', pdfParseAvailable() ? 'loaded' : 'UNAVAILABLE');
 console.log('[forecaster] gemini ready:', gemini.ready);
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -48,13 +45,12 @@ function sanitisePatterns(raw) {
 }
 
 async function extractTextFromFiles(files) {
-  if (!pdfParse) throw new Error('PDF parser is not available on this server. Please paste your exam questions as text instead.');
+  if (!pdfParseAvailable()) throw new Error('PDF parser is not available on this server. Please paste your exam questions as text instead.');
   const chunks = [];
   const meta   = [];
   for (const file of files) {
     try {
-      const parsed = await pdfParse(file.data);
-      const text   = (parsed.text || '').trim();
+      const text = (await extractPdfText(file.data)).trim();
       if (!text) { console.warn(`[forecaster] No text in ${file.name} (likely scanned image)`); continue; }
       chunks.push(`=== ${file.name} ===\n${text.slice(0, 8000)}`);
       meta.push({ name: file.name, textLength: text.length });
@@ -76,7 +72,7 @@ router.get('/health', async (req, res) => {
       aiStatus = 'ok';
     } catch (e) { aiStatus = `error: ${e.message}`; }
   }
-  res.json({ ai: aiStatus, pdfParse: !!pdfParse, keys: gemini.keyCount });
+  res.json({ ai: aiStatus, pdfParse: pdfParseAvailable(), keys: gemini.keyCount });
 });
 
 // ── POST /api/forecaster/analyze ─────────────────────────────────────────────
