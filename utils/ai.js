@@ -96,9 +96,15 @@ class AIClient {
   _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   // ── Core call: tries every (key, model) combination before giving up ───────
-  async _call(prompt, opts = {}) {
+  // `promptOrParts` is either a plain string (wrapped as a single text part —
+  // every existing caller) or an already-built Gemini `parts` array (used by
+  // generateJSONFromFiles to attach inline file data alongside the text
+  // prompt). The rotation/retry/error-classification loop below doesn't care
+  // which — it just forwards whatever parts it was given.
+  async _call(promptOrParts, opts = {}) {
     if (!this.ready) throw new Error(GENERIC_UNAVAILABLE);
 
+    const parts = Array.isArray(promptOrParts) ? promptOrParts : [{ text: promptOrParts }];
     const { jsonMode = false, temperature = 0.7, maxOutputTokens = 8192 } = opts;
     const generationConfig = {
       temperature, topK: 40, topP: 0.95, maxOutputTokens,
@@ -121,7 +127,7 @@ class AIClient {
 
       try {
         const model  = this._genAI.getGenerativeModel({ model: modelName, generationConfig });
-        const result = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }] }] });
+        const result = await model.generateContent({ contents: [{ role: 'user', parts }] });
         const text   = result.response.text().trim();
         if (!text) throw new Error('Empty response');
         return text;
@@ -157,12 +163,10 @@ class AIClient {
     throw new Error(GENERIC_UNAVAILABLE);
   }
 
-  // ── Public: generate JSON ─────────────────────────────────────────────────────
-  // Returns a parsed JS object. Throws a clean, generic error if the model
-  // response can't be parsed — never echoes raw model output back to callers.
-  async generateJSON(prompt, opts = {}) {
-    const raw = await this._call(prompt, { ...opts, jsonMode: true });
-
+  // ── Shared JSON recovery — used by generateJSON and generateJSONFromFiles ──
+  // Throws a clean, generic error if the model response can't be parsed —
+  // never echoes raw model output back to callers.
+  _parseJSONResponse(raw) {
     // Strip any markdown fences the model might add despite the mime type
     const cleaned = raw
       .replace(/^```(?:json)?\s*/i, '')
@@ -189,6 +193,30 @@ class AIClient {
       console.error('[AI] Non-JSON output could not be parsed:', cleaned.slice(0, 200));
       throw new Error('The AI returned an unexpected response. Please try again.');
     }
+  }
+
+  // ── Public: generate JSON ─────────────────────────────────────────────────────
+  // Returns a parsed JS object. Throws a clean, generic error if the model
+  // response can't be parsed — never echoes raw model output back to callers.
+  async generateJSON(prompt, opts = {}) {
+    const raw = await this._call(prompt, { ...opts, jsonMode: true });
+    return this._parseJSONResponse(raw);
+  }
+
+  // ── Public: generate JSON from a prompt + one or more attached files ───────
+  // `files`: [{ data: Buffer, mimeType: string }]. Sends the raw file bytes
+  // to the model as inline multimodal input alongside the text prompt — used
+  // for "vision mode" PDF uploads where diagrams/charts/images matter, since
+  // Gemini reads PDF pages natively (as images internally) rather than
+  // needing text pre-extracted. Same rotation/retry/error-handling as every
+  // other call — routes never touch the provider directly.
+  async generateJSONFromFiles(prompt, files, opts = {}) {
+    const parts = [
+      ...files.map(f => ({ inlineData: { mimeType: f.mimeType, data: f.data.toString('base64') } })),
+      { text: prompt },
+    ];
+    const raw = await this._call(parts, { ...opts, jsonMode: true });
+    return this._parseJSONResponse(raw);
   }
 
   // ── Public: generate plain text ───────────────────────────────────────────────

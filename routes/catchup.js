@@ -74,10 +74,17 @@ router.post('/create', auth, async (req, res) => {
     if (!title)   return res.status(400).json({ error: 'A title for this catch-up session is required.' });
     if (!subject) return res.status(400).json({ error: 'Subject is required.' });
 
+    // 'vision' sends the raw PDF(s) straight to Gemini so diagrams, charts,
+    // and images are actually read, not just whatever text pdf-parse could
+    // pull out. Defaults to 'text' so older cached frontend bundles (which
+    // never send this field) keep working exactly as before.
+    const extractionMode = req.body?.extractionMode === 'vision' ? 'vision' : 'text';
+
     let uploadedFiles = [];
     let combinedText  = '';
+    let visionFiles   = null; // [{ data: Buffer, mimeType }] — only set in vision mode
 
-    // ── Path A: pasted text (JSON body) ──────────────────────────────────────
+    // ── Path A: pasted text (JSON body) — always text-only, no images possible ─
     if (req.body?.pastedText?.trim()) {
       combinedText  = req.body.pastedText.trim().slice(0, 20000);
       uploadedFiles = [{ name: 'Pasted notes', textLength: combinedText.length }];
@@ -86,25 +93,39 @@ router.post('/create', auth, async (req, res) => {
     } else if (req.files && Object.keys(req.files).length > 0) {
       const rawFiles = req.files.docs || Object.values(req.files)[0];
       const fileList = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
-      try {
-        const { chunks, meta } = await extractTextFromFiles(fileList);
-        combinedText  = chunks.join('\n\n').slice(0, 20000);
-        uploadedFiles = meta;
-      } catch (extractErr) {
-        return res.status(422).json({ error: extractErr.message });
+
+      if (extractionMode === 'vision') {
+        visionFiles   = fileList.map(f => ({ data: f.data, mimeType: f.mimetype || 'application/pdf' }));
+        uploadedFiles = fileList.map(f => ({ name: f.name, textLength: f.data.length }));
+      } else {
+        try {
+          const { chunks, meta } = await extractTextFromFiles(fileList);
+          combinedText  = chunks.join('\n\n').slice(0, 20000);
+          uploadedFiles = meta;
+        } catch (extractErr) {
+          return res.status(422).json({ error: extractErr.message });
+        }
       }
     } else {
       return res.status(400).json({ error: 'Upload class documents (field: docs) or paste your notes as text.' });
     }
 
-    if (!combinedText.trim())
+    if (extractionMode === 'text' && !combinedText.trim())
       return res.status(422).json({ error: 'No usable text found. Please check your files or paste the class notes directly.' });
 
     // ── AI: teach the material back to the student ────────────────────────────
+    // Vision mode also asks for a full prose transcript (including describing
+    // diagrams/charts in words) — the later generate-quiz/generate-flashcards
+    // steps are separate requests with no file re-upload, so they read
+    // session.combinedText same as always; this is what makes that keep
+    // working without needing the original files again.
+    const materialSection = extractionMode === 'vision'
+      ? `The class material is attached as a PDF file — read all text AND any diagrams, charts, tables, photos, or images it contains.`
+      : `Class material:\n${combinedText}`;
+
     const summaryPrompt = `You are an expert, encouraging tutor helping a student catch up on a ${subject} class they missed.
 
-Class material:
-${combinedText}
+${materialSection}
 
 TASK: Teach this student the material as if they weren't there — clear, plain language, genuinely explanatory.
 
@@ -114,7 +135,8 @@ Return ONLY valid JSON (no markdown, no extra text):
   "keyConcepts": [
     { "heading": "Concept name", "explanation": "Clear explanation in plain language, 2-4 sentences, as if teaching someone who's never seen this before" }
   ],
-  "recap": "A short, memorable summary of the most important takeaways, written as a quick revision recap"
+  "recap": "A short, memorable summary of the most important takeaways, written as a quick revision recap"${extractionMode === 'vision' ? `,
+  "transcript": "A thorough, detailed prose transcript of everything in the material — all text content plus a full written description of every diagram, chart, table, or image (what it shows, its labels, and what it demonstrates) — detailed enough that someone who never saw the PDF could fully understand it from this transcript alone. This will be used later to generate quiz questions and flashcards, so be comprehensive."` : ''}
 }
 
 RULES:
@@ -124,7 +146,9 @@ RULES:
 
     let summary;
     try {
-      const parsed = await gemini.generateJSON(summaryPrompt, { maxOutputTokens: 2048, temperature: 0.5 });
+      const parsed = extractionMode === 'vision'
+        ? await gemini.generateJSONFromFiles(summaryPrompt, visionFiles, { maxOutputTokens: 4096, temperature: 0.5 })
+        : await gemini.generateJSON(summaryPrompt, { maxOutputTokens: 2048, temperature: 0.5 });
       const keyConcepts = Array.isArray(parsed.keyConcepts)
         ? parsed.keyConcepts
             .map(c => ({ heading: String(c.heading || '').trim(), explanation: String(c.explanation || '').trim() }))
@@ -138,6 +162,11 @@ RULES:
       };
       if (!summary.overview && keyConcepts.length === 0)
         throw new Error('AI returned an empty summary — try again.');
+
+      if (extractionMode === 'vision') {
+        combinedText = String(parsed.transcript || '').trim().slice(0, 20000);
+        if (!combinedText) throw new Error('AI could not read this PDF — try the "Text Only" option or paste the notes instead.');
+      }
     } catch (aiErr) {
       console.error('[catchup] summary AI error:', aiErr.message);
       return res.status(500).json({ error: `AI failed to summarise this material: ${aiErr.message}` });

@@ -121,6 +121,32 @@ router.post("/generate-quiz", auth, async (req, res) => {
       timeLimit = 30, content, source = "text", topic, url,
       questionType = "mcq", bankSubject
     } = req.body;
+    // 'vision' sends the raw PDF straight to Gemini so diagrams/charts/images
+    // are actually read, not just whatever text pdf-parse could pull out —
+    // used below for the multi-pdf and single-file PDF sources only (topic/
+    // question-bank/url never involve a PDF). Defaults to 'text' so older
+    // cached frontend bundles keep working.
+    const extractionMode = req.body.extractionMode === "vision" ? "vision" : "text";
+
+    // Vision-mode PDFs are transcribed via Gemini first (into detailed prose,
+    // including describing diagrams/charts) and dropped straight into
+    // extractedText — every downstream prompt template below then works
+    // completely unchanged, exactly as if pdf-parse had produced this text.
+    async function transcribePdfsVision(files) {
+      const visionPrompt = `You are transcribing source material for quiz generation. The material is attached as PDF file(s) — read all text AND any diagrams, charts, tables, photos, or images they contain.
+
+Produce a thorough, detailed prose transcript of everything in the material — all text content plus a full written description of every diagram, chart, table, or image (what it shows, its labels, and what it demonstrates) — detailed enough that quiz questions could be written from this transcript alone.
+
+Return ONLY valid JSON: { "transcript": "..." }`;
+      const parsed = await gemini.generateJSONFromFiles(
+        visionPrompt,
+        files.map(f => ({ data: f.data, mimeType: f.mimetype || "application/pdf" })),
+        { maxOutputTokens: 8192, temperature: 0.4 }
+      );
+      const transcript = String(parsed.transcript || "").trim();
+      if (!transcript) throw new Error("AI could not read this PDF");
+      return transcript;
+    }
 
     let extractedText = "";
 
@@ -180,12 +206,37 @@ router.post("/generate-quiz", auth, async (req, res) => {
       const fileList = Array.isArray(files.files) ? files.files : Object.values(files).flat();
       if (fileList.length === 0) return res.status(400).json({ error: "No PDF files found" });
 
-      for (const file of fileList) {
-        if (file.mimetype === "application/pdf") {
-          extractedText += await extractPdfText(file.data) + "\n\n";
-        } else if (file.mimetype.includes("word")) {
-          const r = await mammoth.extractRawText({ buffer: file.data });
-          extractedText += r.value + "\n\n";
+      if (extractionMode === "vision") {
+        const pdfFiles = fileList.filter(f => f.mimetype === "application/pdf");
+        if (pdfFiles.length === 0) return res.status(400).json({ error: "No PDF files found for vision mode" });
+        try {
+          extractedText = await transcribePdfsVision(pdfFiles);
+        } catch (visionErr) {
+          console.error("PDF vision error:", visionErr.message);
+          return res.status(422).json({ error: `AI failed to read these PDFs: ${visionErr.message}` });
+        }
+        // Any DOCX files alongside the PDFs still go through normal text extraction
+        for (const file of fileList.filter(f => f.mimetype.includes("word"))) {
+          try {
+            const r = await mammoth.extractRawText({ buffer: file.data });
+            extractedText += "\n\n" + r.value;
+          } catch (docErr) {
+            console.error("DOCX parse error:", docErr.message);
+          }
+        }
+      } else {
+        try {
+          for (const file of fileList) {
+            if (file.mimetype === "application/pdf") {
+              extractedText += await extractPdfText(file.data) + "\n\n";
+            } else if (file.mimetype.includes("word")) {
+              const r = await mammoth.extractRawText({ buffer: file.data });
+              extractedText += r.value + "\n\n";
+            }
+          }
+        } catch (extractErr) {
+          console.error("File extraction error:", extractErr.message);
+          return res.status(422).json({ error: "Could not read one of the uploaded files. Try the \"Has Images / Diagrams\" option, or paste the text instead." });
         }
       }
       if (!extractedText.trim()) return res.status(400).json({ error: "No readable text in uploaded files" });
@@ -235,7 +286,21 @@ router.post("/generate-quiz", auth, async (req, res) => {
       } else if (req.files?.file) {
         const file = req.files.file;
         if (file.mimetype === "application/pdf") {
-          extractedText = await extractPdfText(file.data);
+          if (extractionMode === "vision") {
+            try {
+              extractedText = await transcribePdfsVision([file]);
+            } catch (visionErr) {
+              console.error("PDF vision error:", visionErr.message);
+              return res.status(422).json({ error: `AI failed to read this PDF: ${visionErr.message}` });
+            }
+          } else {
+            try {
+              extractedText = await extractPdfText(file.data);
+            } catch (extractErr) {
+              console.error("PDF parse error:", extractErr.message);
+              return res.status(422).json({ error: "PDF parsing failed. Try the \"Has Images / Diagrams\" option, or paste the text instead." });
+            }
+          }
         } else if (file.mimetype.includes("word")) {
           const r = await mammoth.extractRawText({ buffer: file.data });
           extractedText = r.value;

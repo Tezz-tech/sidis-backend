@@ -16,8 +16,12 @@ router.post("/generate-flashcards", auth, async (req, res) => {
   try {
     const { title, subject, content } = req.body;
     const pdfFile = req.files?.pdfFile;
+    // 'vision' sends the raw PDF straight to Gemini so diagrams/charts/images
+    // are actually read, not just whatever text pdf-parse could pull out.
+    const extractionMode = req.body?.extractionMode === "vision" ? "vision" : "text";
 
     let extractedText = "";
+    let useVision = false;
 
     // 1. PASTED TEXT (priority)
     if (content && typeof content === "string" && content.trim().length > 100) {
@@ -32,13 +36,22 @@ router.post("/generate-flashcards", auth, async (req, res) => {
         return res.status(400).json({ error: "PDF must be under 5MB" });
       }
 
-      if (!pdfParseAvailable()) return res.status(503).json({ error: "PDF parser unavailable on this server. Please paste your notes as text instead." });
-      extractedText = await extractPdfText(pdfFile.data);
+      if (extractionMode === "vision") {
+        useVision = true;
+      } else {
+        if (!pdfParseAvailable()) return res.status(503).json({ error: "PDF parser unavailable on this server. Please paste your notes as text instead." });
+        try {
+          extractedText = await extractPdfText(pdfFile.data);
+        } catch (extractErr) {
+          console.error("PDF parse error:", extractErr.message);
+          return res.status(422).json({ error: "PDF parsing failed. Try the \"Has Images / Diagrams\" option, or paste the text instead." });
+        }
+      }
     } else {
       return res.status(400).json({ error: "Please provide either pasted text or upload a PDF" });
     }
 
-    if (!extractedText.trim()) {
+    if (!useVision && !extractedText.trim()) {
       return res.status(400).json({ error: "No readable text found in your input" });
     }
 
@@ -48,12 +61,13 @@ router.post("/generate-flashcards", auth, async (req, res) => {
 Subject: ${subject || "General"}
 Return ONLY a valid JSON array, no markdown:
 [{"question":"...","answer":"...","topic":"the specific sub-topic this card tests, e.g. 'Depreciation' not just 'Accounting'"},...]
-Content:
-${safeText}`.trim();
+${useVision ? "The content is attached as a PDF file — read all text AND any diagrams, charts, tables, or images it contains." : `Content:\n${safeText}`}`.trim();
 
     let cards;
     try {
-      const parsed = await gemini.generateJSON(prompt);
+      const parsed = useVision
+        ? await gemini.generateJSONFromFiles(prompt, [{ data: pdfFile.data, mimeType: pdfFile.mimetype || "application/pdf" }])
+        : await gemini.generateJSON(prompt);
       cards = Array.isArray(parsed) ? parsed : parsed?.cards || parsed?.flashcards || [];
       if (cards.length === 0) throw new Error("Empty card array");
     } catch (aiErr) {

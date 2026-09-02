@@ -15,8 +15,8 @@ async function requireForecasterAccess(req, res, next) {
     if (!features.forecaster) {
       return res.status(403).json({
         error:    'plan_required',
-        message:  'The Question Forecaster is available on Monthly Group and Yearly Group plans.',
-        required: 'monthly_group',
+        message:  'The Question Forecaster is available on all paid plans except Exam Mode.',
+        required: 'weekly_group',
       });
     }
     next();
@@ -88,10 +88,17 @@ router.post('/analyze', auth, requireForecasterAccess, async (req, res) => {
     if (!examSubject)
       return res.status(400).json({ error: 'Exam subject is required.' });
 
+    // 'vision' sends the raw PDF(s) straight to Gemini so diagrams/charts in
+    // past papers (graphs, circuit diagrams, labeled figures) are actually
+    // read, not just whatever text pdf-parse could pull out. Defaults to
+    // 'text' so older cached frontend bundles keep working.
+    const extractionMode = req.body?.extractionMode === 'vision' ? 'vision' : 'text';
+
     let uploadedFiles = [];
     let combinedText  = '';
+    let visionFiles   = null;
 
-    // ── Path A: pasted text (JSON body) ──────────────────────────────────────
+    // ── Path A: pasted text (JSON body) — always text-only ────────────────────
     if (req.body?.pastedText?.trim()) {
       combinedText  = req.body.pastedText.trim().slice(0, 20000);
       uploadedFiles = [{ name: 'Pasted text', textLength: combinedText.length }];
@@ -100,27 +107,36 @@ router.post('/analyze', auth, requireForecasterAccess, async (req, res) => {
     } else if (req.files && Object.keys(req.files).length > 0) {
       const rawFiles = req.files.pdfs || Object.values(req.files)[0];
       const fileList = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
-      try {
-        const { chunks, meta } = await extractTextFromFiles(fileList);
-        combinedText  = chunks.join('\n\n').slice(0, 20000);
-        uploadedFiles = meta;
-      } catch (extractErr) {
-        return res.status(422).json({ error: extractErr.message });
+
+      if (extractionMode === 'vision') {
+        visionFiles   = fileList.map(f => ({ data: f.data, mimeType: f.mimetype || 'application/pdf' }));
+        uploadedFiles = fileList.map(f => ({ name: f.name, textLength: f.data.length }));
+      } else {
+        try {
+          const { chunks, meta } = await extractTextFromFiles(fileList);
+          combinedText  = chunks.join('\n\n').slice(0, 20000);
+          uploadedFiles = meta;
+        } catch (extractErr) {
+          return res.status(422).json({ error: extractErr.message });
+        }
       }
     } else {
       return res.status(400).json({ error: 'Send either PDF files (field: pdfs) or a pastedText body field.' });
     }
 
-    if (!combinedText.trim())
+    if (extractionMode === 'text' && !combinedText.trim())
       return res.status(422).json({ error: 'No usable text found. Please check your PDFs or paste the exam content directly.' });
 
     // ── AI analysis ───────────────────────────────────────────────────────────
-    console.log(`[forecaster] Analysing ${examSubject} — ${combinedText.length} chars, ${uploadedFiles.length} source(s)`);
+    console.log(`[forecaster] Analysing ${examSubject} — ${extractionMode} mode, ${uploadedFiles.length} source(s)`);
+
+    const contentSection = extractionMode === 'vision'
+      ? `The past exam papers are attached as PDF file(s) — read all text AND any diagrams, charts, tables, or figures they contain.`
+      : `CONTENT:\n${combinedText}`;
 
     const analysisPrompt = `You are an expert exam analyst. Analyse these past ${examSubject} exam questions/papers.
 
-CONTENT:
-${combinedText}
+${contentSection}
 
 TASK: Identify the most frequently tested topics.
 
@@ -143,7 +159,9 @@ RULES:
     let analysisSummary = '';
 
     try {
-      const parsed = await gemini.generateJSON(analysisPrompt, { maxOutputTokens: 8192, temperature: 0.4 });
+      const parsed = extractionMode === 'vision'
+        ? await gemini.generateJSONFromFiles(analysisPrompt, visionFiles, { maxOutputTokens: 8192, temperature: 0.4 })
+        : await gemini.generateJSON(analysisPrompt, { maxOutputTokens: 8192, temperature: 0.4 });
       if (typeof parsed.analysisSummary === 'string' && parsed.analysisSummary) {
         analysisSummary = parsed.analysisSummary;
       }

@@ -11,6 +11,7 @@ const FlashcardSet = require('../models/FlashcardSet');
 const { gemini, capText } = require('../utils/ai');
 const { resolveSpecificSubject } = require('../utils/subjectResolver');
 const { computeAndSyncUserStats } = require('../utils/userStats');
+const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
 
 // Build a quizId → specific-subject map for results tagged as "General"
 async function buildQuizSubjectMap(results) {
@@ -175,6 +176,16 @@ router.get('/rankings', auth, async (req, res) => {
 router.get('/sid-iq', auth, async (req, res) => {
   try {
     const userId = req.user.userId;
+
+    const plan     = await getUserPlan(userId);
+    const features = getPlanFeatures(plan);
+    if (!features.sidIQ) {
+      return res.status(403).json({
+        error:    'plan_required',
+        message:  "SID's IQ is available on all paid plans except Exam Mode.",
+        required: 'weekly_group',
+      });
+    }
 
     const [user, results] = await Promise.all([
       User.findById(userId),

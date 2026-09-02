@@ -633,7 +633,12 @@ router.post("/quizzes/generate", async (req, res) => {
   try {
     const { title = "Untitled Quiz", subject = "General", numQuestions = 15, difficulty = "medium", timeLimit = 30, content } = req.body;
     const file = req.files?.file;
+    // 'vision' sends the raw PDF straight to Gemini so diagrams/charts/images
+    // are actually read, not just whatever text pdf-parse could pull out.
+    // Only meaningful for PDFs — DOCX has no page-image concept.
+    const extractionMode = req.body?.extractionMode === "vision" ? "vision" : "text";
     let extractedText = "";
+    let useVision = false;
 
     if (content && typeof content === "string" && content.trim().length > 150) {
       extractedText = content.trim();
@@ -643,24 +648,40 @@ router.post("/quizzes/generate", async (req, res) => {
       if (file.size > 12 * 1024 * 1024) return res.status(400).json({ error: "File must be under 12MB" });
 
       if (file.mimetype === "application/pdf") {
-        if (!pdfParseAvailable()) return res.status(503).json({ error: "PDF parser unavailable on this server." });
-        extractedText += await extractPdfText(file.data);
+        if (extractionMode === "vision") {
+          useVision = true;
+        } else {
+          if (!pdfParseAvailable()) return res.status(503).json({ error: "PDF parser unavailable on this server." });
+          try {
+            extractedText += await extractPdfText(file.data);
+          } catch (extractErr) {
+            console.error("PDF parse error:", extractErr.message);
+            return res.status(422).json({ error: "PDF parsing failed. Try the \"Has Images / Diagrams\" option, or paste the text instead." });
+          }
+        }
       } else {
-        const result = await mammoth.extractRawText({ buffer: file.data });
-        extractedText = result.value;
+        try {
+          const result = await mammoth.extractRawText({ buffer: file.data });
+          extractedText = result.value;
+        } catch (extractErr) {
+          console.error("DOCX parse error:", extractErr.message);
+          return res.status(422).json({ error: "DOCX parsing failed. Please try a different file or paste the text instead." });
+        }
       }
     } else {
       return res.status(400).json({ error: "Provide either content or file" });
     }
 
-    if (!extractedText.trim()) return res.status(400).json({ error: "No readable text found" });
+    if (!useVision && !extractedText.trim()) return res.status(400).json({ error: "No readable text found" });
 
     const safeText = capText(extractedText, 60000);
-    const prompt = `Generate ${numQuestions} multiple-choice questions.\nSubject: ${subject}. Difficulty: ${difficulty}.\nReturn ONLY a valid JSON array, no markdown:\n[{"question":"...","options":["A","B","C","D"],"correctAnswer":0}]\nContent:\n${safeText}`.trim();
+    const prompt = `Generate ${numQuestions} multiple-choice questions.\nSubject: ${subject}. Difficulty: ${difficulty}.\nReturn ONLY a valid JSON array, no markdown:\n[{"question":"...","options":["A","B","C","D"],"correctAnswer":0}]\n${useVision ? "The content is attached as a PDF file — read all text AND any diagrams, charts, tables, or images it contains." : `Content:\n${safeText}`}`.trim();
 
     let questions;
     try {
-      const parsed = await gemini.generateJSON(prompt);
+      const parsed = useVision
+        ? await gemini.generateJSONFromFiles(prompt, [{ data: file.data, mimeType: file.mimetype }])
+        : await gemini.generateJSON(prompt);
       questions = (Array.isArray(parsed) ? parsed : parsed?.questions || [])
         .map(q => ({
           question: q.question?.trim(),
@@ -697,7 +718,9 @@ router.post("/flashcards/generate", async (req, res) => {
   try {
     const { title = "Untitled Flashcards", subject = "General", content } = req.body;
     const pdfFile = req.files?.pdfFile;
+    const extractionMode = req.body?.extractionMode === "vision" ? "vision" : "text";
     let extractedText = "";
+    let useVision = false;
 
     if (content && typeof content === "string" && content.trim().length > 100) {
       extractedText = content.trim();
@@ -705,20 +728,31 @@ router.post("/flashcards/generate", async (req, res) => {
       if (pdfFile.mimetype !== "application/pdf") return res.status(400).json({ error: "Only PDF allowed" });
       if (pdfFile.size > 5 * 1024 * 1024) return res.status(400).json({ error: "PDF must be under 5MB" });
 
-      if (!pdfParseAvailable()) return res.status(503).json({ error: "PDF parser unavailable on this server." });
-      extractedText += await extractPdfText(pdfFile.data);
+      if (extractionMode === "vision") {
+        useVision = true;
+      } else {
+        if (!pdfParseAvailable()) return res.status(503).json({ error: "PDF parser unavailable on this server." });
+        try {
+          extractedText += await extractPdfText(pdfFile.data);
+        } catch (extractErr) {
+          console.error("PDF parse error:", extractErr.message);
+          return res.status(422).json({ error: "PDF parsing failed. Try the \"Has Images / Diagrams\" option, or paste the text instead." });
+        }
+      }
     } else {
       return res.status(400).json({ error: "Provide content or PDF" });
     }
 
-    if (!extractedText.trim()) return res.status(400).json({ error: "No text extracted" });
+    if (!useVision && !extractedText.trim()) return res.status(400).json({ error: "No text extracted" });
 
     const safeText = capText(extractedText, 30000);
-    const prompt = `Generate 12 high-quality flashcards for ${subject}.\nReturn ONLY a valid JSON array, no markdown:\n[{"question":"Term?","answer":"Definition"}]\nContent:\n${safeText}`.trim();
+    const prompt = `Generate 12 high-quality flashcards for ${subject}.\nReturn ONLY a valid JSON array, no markdown:\n[{"question":"Term?","answer":"Definition"}]\n${useVision ? "The content is attached as a PDF file — read all text AND any diagrams, charts, tables, or images it contains." : `Content:\n${safeText}`}`.trim();
 
     let cards;
     try {
-      const parsed = await gemini.generateJSON(prompt);
+      const parsed = useVision
+        ? await gemini.generateJSONFromFiles(prompt, [{ data: pdfFile.data, mimeType: pdfFile.mimetype || "application/pdf" }])
+        : await gemini.generateJSON(prompt);
       cards = (Array.isArray(parsed) ? parsed : parsed?.cards || [])
         .map(c => ({ question: c.question?.trim(), answer: c.answer?.trim() }))
         .filter(c => c.question && c.answer);

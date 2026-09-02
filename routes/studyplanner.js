@@ -192,19 +192,46 @@ router.post('/:planId/subject-material', auth, async (req, res) => {
     const subject = (req.body?.subject || '').trim();
     if (!subject) return res.status(400).json({ error: 'subject field is required' });
 
+    // 'vision' sends the raw PDF straight to Gemini so diagrams/charts/images
+    // are actually read, not just whatever text pdf-parse could pull out.
+    // Defaults to 'text' so older cached frontend bundles keep working.
+    const extractionMode = req.body?.extractionMode === 'vision' ? 'vision' : 'text';
+
     let extractedText = '';
     let fileName      = '';
 
     if (req.files?.pdf) {
-      if (!pdfParseAvailable()) return res.status(503).json({ error: 'PDF parser unavailable on this server.' });
-      try {
-        extractedText = (await extractPdfText(req.files.pdf.data)).trim();
-        fileName      = req.files.pdf.name || 'document.pdf';
-        if (!extractedText)
-          return res.status(422).json({ error: 'No text found in PDF. Use a text-based PDF or paste notes instead.' });
-      } catch (pdfErr) {
-        console.error('PDF parse error:', pdfErr.message);
-        return res.status(422).json({ error: 'PDF parsing failed. Try pasting notes as text.' });
+      fileName = req.files.pdf.name || 'document.pdf';
+
+      if (extractionMode === 'vision') {
+        if (!gemini.ready) return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
+        const visionPrompt = `You are transcribing study material for a student. The material for "${subject}" is attached as a PDF file — read all text AND any diagrams, charts, tables, photos, or images it contains.
+
+Produce a thorough, detailed prose transcript of everything in the material — all text content plus a full written description of every diagram, chart, table, or image (what it shows, its labels, and what it demonstrates) — detailed enough that someone who never saw the PDF could fully understand it from this transcript alone. This will be used to generate quiz questions later, so be comprehensive.
+
+Return ONLY valid JSON: { "transcript": "..." }`;
+        try {
+          const parsed = await gemini.generateJSONFromFiles(
+            visionPrompt,
+            [{ data: req.files.pdf.data, mimeType: req.files.pdf.mimetype || 'application/pdf' }],
+            { maxOutputTokens: 4096, temperature: 0.4 }
+          );
+          extractedText = String(parsed.transcript || '').trim();
+          if (!extractedText) return res.status(422).json({ error: 'AI could not read this PDF. Try "Text Only" or paste the notes instead.' });
+        } catch (aiErr) {
+          console.error('PDF vision error:', aiErr.message);
+          return res.status(422).json({ error: `AI failed to read this PDF: ${aiErr.message}` });
+        }
+      } else {
+        if (!pdfParseAvailable()) return res.status(503).json({ error: 'PDF parser unavailable on this server.' });
+        try {
+          extractedText = (await extractPdfText(req.files.pdf.data)).trim();
+          if (!extractedText)
+            return res.status(422).json({ error: 'No text found in PDF. Use a text-based PDF or paste notes instead.' });
+        } catch (pdfErr) {
+          console.error('PDF parse error:', pdfErr.message);
+          return res.status(422).json({ error: 'PDF parsing failed. Try pasting notes as text.' });
+        }
       }
     } else if (req.body?.notes?.trim()) {
       extractedText = req.body.notes.trim();
