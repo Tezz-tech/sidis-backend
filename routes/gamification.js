@@ -717,6 +717,28 @@ router.post('/remove-ads', auth, async (req, res) => {
   }
 });
 
+// App page directory the tutor draws on to route students to the right
+// feature — keep in sync with the routes actually defined in src/App.jsx.
+const APP_PAGES = [
+  { route: '/over',           label: 'Dashboard',          desc: 'Home base — stats, streak, XP, and your recommended next action.' },
+  { route: '/create-quiz',    label: 'Create a Quiz',      desc: 'Generate an AI quiz from a topic, pasted text, or an uploaded PDF/DOCX.' },
+  { route: '/my-quizzes',     label: 'My Quizzes',         desc: 'Your quiz history and past results.' },
+  { route: '/public-quizzes', label: 'Browse Quizzes',     desc: 'Community quizzes made by other students, searchable by subject.' },
+  { route: '/create-flashcard', label: 'Create Flashcards', desc: 'Generate flashcards from a topic, pasted text, or an uploaded PDF.' },
+  { route: '/my-flashcards',  label: 'My Flashcards',      desc: 'Your saved flashcard sets and study progress.' },
+  { route: '/public-flashcards', label: 'Browse Flashcards', desc: 'Community flashcard sets made by other students.' },
+  { route: '/sid-iq',         label: "SID's IQ",           desc: 'Adaptive learning profile — exam readiness score, weak/strong subjects, personalised recommendations.' },
+  { route: '/study-journey',  label: 'Study Journey',      desc: 'Guided step-by-step milestones with XP rewards.' },
+  { route: '/more-tools',     label: 'More Tools',         desc: 'Hub for Study Planner, Study Catch-Up, Question Forecaster, Discount Randomizer, Ads Remover.' },
+  { route: '/study-planner',  label: 'Study Planner',      desc: 'AI-generated day-by-day study schedule for an upcoming exam.' },
+  { route: '/forecaster',     label: 'Question Forecaster', desc: 'Upload past exam papers and the AI predicts likely topics.' },
+  { route: '/study-catchup',  label: 'Study Catch-Up',     desc: 'Behind on class? Upload lecture docs and get an AI summary, mini-quiz, and flashcards.' },
+  { route: '/discount',       label: 'Discount Randomizer', desc: 'Fun discount/reward spinner tool.' },
+  { route: '/ads-remover',    label: 'Remove Ads',         desc: 'Turn off in-app ads.' },
+  { route: '/profile',        label: 'Profile & Billing',  desc: 'Account settings, subscription plan, and upgrading/managing billing.' },
+  { route: '/pricing',        label: 'Pricing',            desc: 'Compare all subscription plans and prices.' },
+];
+
 // ─── POST /api/gamification/tutor-chat ────────────────────────────────────────
 // Real conversational AI tutor powering the StudyBuddy "Chat" tab. Grounds
 // every answer in the student's own data (recent scores, weak topics, active
@@ -775,7 +797,7 @@ router.post('/tutor-chat', auth, async (req, res) => {
       ? history.slice(-6).map(h => `${h.role === 'user' ? 'Student' : 'Tutor'}: ${h.content}`).join('\n')
       : '';
 
-    const prompt = `You are ${user?.studyBuddyName || 'Siddy'}, a friendly, encouraging personal AI tutor inside a study app called Sidis.
+    const prompt = `You are ${user?.studyBuddyName || 'Siddy'}, a friendly, encouraging personal AI tutor AND app guide inside a study app called Sidis.
 
 Student context (ground your answer in this — don't ask for info you already have here):
 - Recent quiz scores: ${recentScoresStr}
@@ -787,12 +809,23 @@ ${historyText ? `\nRecent conversation:\n${historyText}\n` : ''}
 Student's new message: "${message.trim()}"
 
 Reply as their tutor — be specific and reference their real data above where relevant (e.g. if asked why they scored low, name a real weak topic; if asked what to review next, recommend one of their actual weak topics). If asked to generate a revision question, include one short question and its answer directly in your reply. Keep it conversational, under 120 words, no markdown headers.
-Return JSON: { "reply": "..." }`;
 
-    let reply;
+You are also the app's guide. If the student asks how to do something, where to find a feature, or seems like they'd benefit from a specific page right now, mention it naturally in your reply AND set suggestedRoute/suggestedLabel below so the app can show them a button to jump straight there. Only pick a route when it's genuinely the right next step — leave both null for plain conversation. Pick ONE route from this list that best matches:
+${APP_PAGES.map(p => `- ${p.route} — "${p.label}": ${p.desc}`).join('\n')}
+
+Return JSON: { "reply": "...", "suggestedRoute": "/exact-route-from-list-or-null", "suggestedLabel": "short button text or null" }`;
+
+    let reply, suggestedRoute = null, suggestedLabel = null;
     try {
       const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 400, temperature: 0.7 });
       reply = parsed.reply;
+      const validRoute = APP_PAGES.find(p => p.route === parsed.suggestedRoute);
+      if (validRoute) {
+        suggestedRoute = validRoute.route;
+        suggestedLabel = (typeof parsed.suggestedLabel === 'string' && parsed.suggestedLabel.trim())
+          ? parsed.suggestedLabel.trim().slice(0, 40)
+          : validRoute.label;
+      }
     } catch (aiErr) {
       console.error('Tutor chat AI error:', aiErr.message);
       return res.status(500).json({ error: 'AI failed to respond. Try again.' });
@@ -803,7 +836,7 @@ Return JSON: { "reply": "..." }`;
       await User.updateOne({ _id: userId }, { $set: { tutorChatCount: usedToday + 1, tutorChatCountDate: new Date() } });
     }
 
-    res.json({ success: true, reply });
+    res.json({ success: true, reply, suggestedRoute, suggestedLabel });
   } catch (err) {
     console.error('Tutor chat error:', err);
     res.status(500).json({ error: 'Server error' });

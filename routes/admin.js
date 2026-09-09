@@ -1,6 +1,8 @@
 // routes/admin.js
 const express = require("express");
 const router = express.Router();
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Quiz = require("../models/Quiz");
 const QuizResult = require("../models/QuizResult");
@@ -9,9 +11,48 @@ const ActivityLog = require("../models/ActivityLog");
 const Subscription = require("../models/Subscription");
 const { extractPdfText, pdfParseAvailable } = require("../utils/pdfExtract");
 const mammoth = require("mammoth");
+const adminAuth = require("../middlewares/adminAuth");
 
 require("dotenv").config();
 const { gemini, capText } = require("../utils/ai");
+
+// ==================== ADMIN LOGIN ====================
+// Real, server-verified admin auth — credentials live only as an email +
+// bcrypt hash in env vars, never in frontend source. Must be defined before
+// the router.use(adminAuth) gate below so the login route itself stays
+// reachable without a token.
+router.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: "Email and password are required" });
+
+    const adminEmail = process.env.ADMIN_EMAIL;
+    const adminHash  = process.env.ADMIN_PASSWORD_HASH;
+    if (!adminEmail || !adminHash) {
+      console.error("[admin] ADMIN_EMAIL / ADMIN_PASSWORD_HASH not configured");
+      return res.status(503).json({ error: "Admin login is not configured on this server." });
+    }
+
+    const emailMatches = email.trim().toLowerCase() === adminEmail.trim().toLowerCase();
+    // Always run bcrypt.compare even on an email mismatch, using the real
+    // hash either way, so a wrong email doesn't return faster than a wrong
+    // password (fixed response time regardless of which part was wrong).
+    const passwordMatches = await bcrypt.compare(password, adminHash);
+
+    if (!emailMatches || !passwordMatches) {
+      return res.status(401).json({ error: "Invalid email or password." });
+    }
+
+    const token = jwt.sign({ isAdmin: true, email: adminEmail }, process.env.JWT_SECRET, { expiresIn: "12h" });
+    res.json({ success: true, token, email: adminEmail });
+  } catch (err) {
+    console.error("[admin] login error:", err.message);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Every route below this line requires a valid admin JWT.
+router.use(adminAuth);
 
 const PLAN_CONFIG = {
   exam_mode:          { name: 'Exam Mode',          amount: 725000,  durationDays: 3650 },
