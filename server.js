@@ -6,12 +6,16 @@ require('dotenv').config();
 
 const express = require('express');
 const connectDB = require('./config/db');
-const authRoutes = require('./routes/auth');
-const dashboardRoutes = require('./routes/dashboard');
-const quizRoutes = require('./routes/quizzes');
+let authRoutes = null;
+try { authRoutes = require('./routes/auth'); console.log('auth routes: loaded'); } catch (e) { console.error('auth load error:', e.message, e.stack); }
+let dashboardRoutes = null;
+try { dashboardRoutes = require('./routes/dashboard'); console.log('dashboard routes: loaded'); } catch (e) { console.error('dashboard load error:', e.message, e.stack); }
+let quizRoutes = null;
+try { quizRoutes = require('./routes/quizzes'); console.log('quiz routes: loaded'); } catch (e) { console.error('quiz load error:', e.message, e.stack); }
 let adminRoutes = null;
 try { adminRoutes = require('./routes/admin'); console.log('admin routes: loaded'); } catch (e) { console.error('admin load error:', e.message, e.stack); }
-const flashcardRoutes = require('./routes/flashcards');
+let flashcardRoutes = null;
+try { flashcardRoutes = require('./routes/flashcards'); console.log('flashcard routes: loaded'); } catch (e) { console.error('flashcard load error:', e.message, e.stack); }
 let gamificationRoutes = null;
 try { gamificationRoutes = require('./routes/gamification'); } catch (e) { console.error('gamification load error:', e.message); }
 let studyPlannerRoutes = null;
@@ -109,9 +113,9 @@ app.get('/api/health', async (req, res) => {
   res.json({ ai: aiStatus, pdfParse: pdfStatus, keys: gemini.keyCount });
 });
 
-app.use('/api/auth', authRoutes);
-app.use('/api/dashboard', dashboardRoutes);
-app.use('/api/quizzes', quizRoutes);
+if (authRoutes)      app.use('/api/auth',      authRoutes);
+if (dashboardRoutes) app.use('/api/dashboard', dashboardRoutes);
+if (quizRoutes)      app.use('/api/quizzes',   quizRoutes);
 
 // Resolve possible export shapes (router, { default: router }, or module with .router)
 let adminRouter = adminRoutes;
@@ -124,7 +128,7 @@ if (!adminRouter || (typeof adminRouter !== 'function' && typeof adminRouter !==
   app.use('/api/admin', adminRouter);
 }
 
-app.use('/api/flashcards', flashcardRoutes);
+if (flashcardRoutes) app.use('/api/flashcards', flashcardRoutes);
 if (gamificationRoutes)  app.use('/api/gamification',  gamificationRoutes);
 
 // Study planner inline health check — always reachable regardless of router load
