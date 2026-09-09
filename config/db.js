@@ -8,8 +8,13 @@ const connectDB = async () => {
     });
     console.log('MongoDB connected');
   } catch (error) {
-    console.error('MongoDB connection error:', error);
-    process.exit(1);
+    // Never process.exit() here — this runs inside a Vercel serverless
+    // function, where killing the process takes down every concurrent/future
+    // invocation sharing that warm container, not just this one connection
+    // attempt. A transient Atlas hiccup should surface as failed DB calls on
+    // individual routes (each already has its own try/catch), not a total
+    // outage. Mongoose also auto-retries in the background by default.
+    console.error('MongoDB connection error:', error.message);
   }
 };
 
