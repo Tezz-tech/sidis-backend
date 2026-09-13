@@ -71,7 +71,18 @@ app.use((req, res, next) => {
 // -------------------------------------------------
 // 3. Other middleware
 // -------------------------------------------------
-connectDB();
+connectDB(); // fire off an initial attempt so a fully-cold container has a head start
+
+// Every request gets a chance to (re)connect if the DB isn't currently
+// connected — connectDB() is a fast no-op once connected, so this is cheap
+// on the common path. Without this, a container whose one connection
+// attempt at boot failed (a transient Atlas hiccup, a dropped connection)
+// would otherwise stay disconnected for its entire lifetime, since nothing
+// else ever retries.
+app.use(async (req, res, next) => {
+  try { await connectDB(); } catch (_) { /* individual routes already handle DB errors */ }
+  next();
+});
 
 app.use(express.json());
 app.use(
