@@ -733,6 +733,7 @@ const APP_PAGES = [
   { route: '/study-planner',  label: 'Study Planner',      desc: 'AI-generated day-by-day study schedule for an upcoming exam.' },
   { route: '/forecaster',     label: 'Question Forecaster', desc: 'Upload past exam papers and the AI predicts likely topics.' },
   { route: '/study-catchup',  label: 'Study Catch-Up',     desc: 'Behind on class? Upload lecture docs and get an AI summary, mini-quiz, and flashcards.' },
+  { route: '/exam-mode',      label: 'Exam Mode',          desc: 'Upload course material for a guided walkthrough, Q&A study chat, then a proper timed exam with pass/fail feedback.' },
   { route: '/discount',       label: 'Discount Randomizer', desc: 'Fun discount/reward spinner tool.' },
   { route: '/ads-remover',    label: 'Remove Ads',         desc: 'Turn off in-app ads.' },
   { route: '/profile',        label: 'Profile & Billing',  desc: 'Account settings, subscription plan, and upgrading/managing billing.' },

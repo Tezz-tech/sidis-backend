@@ -918,6 +918,7 @@ router.post("/quiz-results", auth, async (req, res) => {
     res.json({
       success: true,
       message: "Quiz result saved successfully",
+      resultId: result._id,
       xpAward: xpAward || null,
       adaptiveActions,
     });
