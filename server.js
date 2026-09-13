@@ -110,7 +110,16 @@ app.get('/api/health', async (req, res) => {
     try { require('pdf-parse'); pdfStatus = true; } catch (_2) {}
   }
 
-  res.json({ ai: aiStatus, pdfParse: pdfStatus, keys: gemini.keyCount });
+  const mongoose = require('mongoose');
+  const READY_STATES = ['disconnected', 'connected', 'connecting', 'disconnecting'];
+  let dbPingMs = null;
+  const dbState = READY_STATES[mongoose.connection.readyState] || 'unknown';
+  if (mongoose.connection.readyState === 1) {
+    const t0 = Date.now();
+    try { await mongoose.connection.db.admin().ping(); dbPingMs = Date.now() - t0; } catch (_) {}
+  }
+
+  res.json({ ai: aiStatus, pdfParse: pdfStatus, keys: gemini.keyCount, dbState, dbPingMs });
 });
 
 if (authRoutes)      app.use('/api/auth',      authRoutes);
