@@ -14,6 +14,13 @@ const mammoth = require("mammoth");
 const adminAuth = require("../middlewares/adminAuth");
 
 require("dotenv").config();
+
+// Escapes regex special characters so a search term like "O'Brien (test)"
+// is treated as a literal substring instead of throwing/misbehaving as a
+// malformed regex pattern.
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 const { gemini, capText } = require("../utils/ai");
 
 // ==================== ADMIN LOGIN ====================
@@ -73,9 +80,20 @@ router.get("/users", async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const skip  = (page - 1) * limit;
 
+    // Search spans the ENTIRE user collection, not just the currently
+    // loaded page — without this, "search" only ever matched whichever 10
+    // users happened to already be on screen.
+    const search = (req.query.search || "").trim();
+    const searchFilter = search
+      ? { $or: [
+          { fullName: { $regex: escapeRegex(search), $options: "i" } },
+          { email:    { $regex: escapeRegex(search), $options: "i" } },
+        ] }
+      : {};
+
     const [users, total] = await Promise.all([
-      User.find().select("-password").sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      User.countDocuments(),
+      User.find(searchFilter).select("-password").sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      User.countDocuments(searchFilter),
     ]);
 
     const now = new Date();
