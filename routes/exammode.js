@@ -82,14 +82,26 @@ async function extractTextFromFiles(files) {
 // Generates a fresh mixed MCQ+essay exam from a session's stored material —
 // shared by both /generate-exam (first attempt) and /retake (regenerates new
 // questions rather than reusing the identical quiz).
-async function generateExamQuiz(session) {
-  const examPrompt = `You are an expert exam-paper setter creating a REALISTIC EXAM PAPER for ${session.subject} — a mix of multiple-choice (objective) and short-answer/essay (theory) questions, in the proportions conventional for this subject (decide the ratio yourself; include at least one of each type).
+const MAX_EXAM_QUESTIONS = 60;
+const EXAM_BATCH_SIZE    = 20;
+const MAX_EXAM_BATCHES   = 3; // 3 × 20 = 60 — kept low since the whole
+// request has to fit inside Vercel's 60s function timeout; fewer, larger
+// batches beats more, smaller ones for total round-trip latency, and 20
+// questions per call still comfortably fits the 8192-token output budget.
 
-Base every question ONLY on the material below.
+function buildExamPrompt(session, askFor, coveredTopics) {
+  const material  = session.combinedText.slice(0, 12000);
+  const qaContext = session.qaSummary ? session.qaSummary.slice(0, 3000) : '';
+  return `You are a ruthless, expert examiner setting an EXTREMELY HARD, in-depth, COMPREHENSIVE exam paper for ${session.subject} — the kind only a student with genuine mastery of the entire material can pass. Mix multiple-choice (objective) and short-answer/essay (theory) questions, in whatever proportion is conventional for this subject.
+
+Base every question ONLY on the material below. Go deep: test application, edge cases, and understanding of WHY — not simple recall of facts stated verbatim. Avoid questions answerable by pattern-matching a sentence from the text; make the student actually reason.
+
+Coverage matters as much as difficulty: identify every distinct concept, section, or sub-topic in the material and write at least one substantial question on each — don't consolidate multiple distinct ideas into a handful of broad questions just to keep the count low. For material covering several distinct topics, a properly thorough exam typically runs well into the double digits, not just a handful of questions.
 
 Class material:
-${session.combinedText.slice(0, 7000)}
-${session.qaSummary ? `\nDuring study, the student and their tutor discussed the following — weight the exam toward areas that seemed weak or heavily discussed:\n${session.qaSummary.slice(0, 3000)}` : ''}
+${material}
+${qaContext ? `\nDuring study, the student and their tutor discussed the following — weight the exam toward areas that seemed weak or heavily discussed:\n${qaContext}` : ''}
+${coveredTopics.length ? `\nQuestions have already been written covering: ${coveredTopics.join('; ')}. Do NOT repeat these — go deeper into the material or test different angles/sub-topics still untested.` : ''}
 
 Return ONLY valid JSON:
 {
@@ -98,12 +110,42 @@ Return ONLY valid JSON:
     { "type": "essay", "question": "...", "modelAnswer": "...", "explanation": "...", "topic": "specific sub-topic" }
   ]
 }
-Aim for 8-12 questions total. correctAnswer is the 0-based index of the correct option, only for "mcq" questions.`;
+Write up to ${askFor} questions — but ONLY if the material genuinely supports that many distinct, non-repetitive, in-depth questions. Return fewer rather than pad with filler or restate the same idea twice. correctAnswer is the 0-based index of the correct option, only for "mcq" questions.`;
+}
 
-  const parsed = await gemini.generateJSON(examPrompt, { maxOutputTokens: 4096, temperature: 0.5 });
-  const raw = Array.isArray(parsed.questions) ? parsed.questions : [];
+// Generates up to MAX_EXAM_QUESTIONS in batches (rather than one huge
+// request) so a genuinely deep exam doesn't risk truncating mid-response,
+// and so each batch can be told what's already been asked to avoid
+// repeating itself. Stops early once the material stops yielding enough
+// genuinely new questions, rather than padding to hit a number.
+async function generateExamQuiz(session) {
+  let allQuestions   = [];
+  let coveredTopics  = [];
 
-  const questions = raw
+  for (let batch = 0; batch < MAX_EXAM_BATCHES && allQuestions.length < MAX_EXAM_QUESTIONS; batch++) {
+    const askFor = Math.min(EXAM_BATCH_SIZE, MAX_EXAM_QUESTIONS - allQuestions.length);
+    const examPrompt = buildExamPrompt(session, askFor, coveredTopics);
+
+    let batchRaw;
+    try {
+      const parsed = await gemini.generateJSON(examPrompt, { maxOutputTokens: 8192, temperature: 0.6 });
+      batchRaw = Array.isArray(parsed.questions) ? parsed.questions : [];
+    } catch (err) {
+      if (allQuestions.length > 0) break; // keep whatever earlier batches already produced
+      throw err;
+    }
+
+    if (batchRaw.length === 0) break; // material exhausted — nothing new to ask
+    allQuestions.push(...batchRaw);
+    coveredTopics.push(...batchRaw.map(q => q.topic).filter(Boolean));
+    // Only apply the early-stop heuristic from the 2nd batch onward — a
+    // cautious first batch is common even when there's genuinely more to
+    // cover, and a follow-up round (now told what's already been asked)
+    // often surfaces distinct angles the first pass missed.
+    if (batch > 0 && batchRaw.length < askFor * 0.5) break;
+  }
+
+  const questions = allQuestions
     .map(q => {
       const isEssay = q.type === 'essay' || !Array.isArray(q.options) || q.options.length < 2;
       return isEssay
@@ -124,7 +166,8 @@ Aim for 8-12 questions total. correctAnswer is the 0-based index of the correct 
             topic:         String(q.topic || '').trim(),
           };
     })
-    .filter(q => q.question && (q.modelAnswer || (q.options.length === 4 && q.correctAnswer !== null)));
+    .filter(q => q.question && (q.modelAnswer || (q.options.length === 4 && q.correctAnswer !== null)))
+    .slice(0, MAX_EXAM_QUESTIONS);
 
   if (questions.length === 0) throw new Error('AI returned no usable exam questions.');
 
@@ -133,7 +176,7 @@ Aim for 8-12 questions total. correctAnswer is the 0-based index of the correct 
     userId:         session.userId,
     title:          quizTitle,
     subject:        session.subject,
-    difficulty:     'medium',
+    difficulty:     'hard',
     timeLimit:      Math.max(20, Math.ceil(questions.length * 3)),
     numQuestions:   questions.length,
     questionType:   'mixed',
@@ -406,17 +449,35 @@ router.post('/:id/report-result', auth, async (req, res) => {
       return res.status(404).json({ error: 'Result not found for this exam session.' });
 
     const passed = result.score >= session.passThreshold;
+
+    // Per-topic time spent — joins timePerQuestion (by index) onto
+    // topicBreakdown (which already carries topic + correctness per
+    // question). "Slow" is relative to this attempt's own average, so it
+    // adapts to exam length rather than using a fixed second count.
+    const times = result.timePerQuestion || [];
+    const avgTime = times.length ? times.reduce((s, t) => s + (t || 0), 0) / times.length : 0;
+    const timeAnalysis = (result.topicBreakdown || [])
+      .filter(t => t.topic && Number.isFinite(times[t.questionIndex]))
+      .map(t => ({
+        topic:          t.topic,
+        avgTimeSeconds: Math.round(times[t.questionIndex]),
+        correct:        t.correct,
+        slow:           avgTime > 0 && times[t.questionIndex] > avgTime * 1.5,
+      }));
+    // A topic that was slow to answer even when correct is still worth
+    // flagging — slow-but-right usually means shaky, not solid, understanding.
+    const needsWork = timeAnalysis.filter(t => !t.correct || t.slow);
+
     let retakeAdvice = '';
 
-    if (!passed && gemini.ready) {
-      const weakTopics = (result.topicBreakdown || [])
-        .filter(t => t.correct === false)
-        .map(t => t.topic)
-        .filter(Boolean);
-      const advicePrompt = `A student scored ${result.score}% on their ${session.subject} exam (needed ${session.passThreshold}% to pass).
-${weakTopics.length ? `Topics they struggled with: ${[...new Set(weakTopics)].join(', ')}.` : ''}
+    if ((!passed || needsWork.length > 0) && gemini.ready) {
+      const wrongTopics = [...new Set(timeAnalysis.filter(t => !t.correct).map(t => t.topic))];
+      const slowTopics   = [...new Set(timeAnalysis.filter(t => t.correct && t.slow).map(t => t.topic))];
+      const advicePrompt = `A student scored ${result.score}% on their ${session.subject} exam (${passed ? `passed — needed ${session.passThreshold}%` : `needed ${session.passThreshold}% to pass`}).
+${wrongTopics.length ? `Topics they answered incorrectly: ${wrongTopics.join(', ')}.` : ''}
+${slowTopics.length ? `Topics they took much longer than average to answer, even though they got them right (a sign of shaky rather than solid understanding): ${slowTopics.join(', ')}.` : ''}
 
-Write encouraging, specific retake advice: what to review before trying again, and how to approach it. Under 100 words, no markdown headers.
+Write ${passed ? 'encouraging feedback on what to reinforce even though they passed' : 'encouraging, specific retake advice: what to review before trying again, and how to approach it'}. Under 100 words, no markdown headers.
 Return ONLY valid JSON: { "advice": "..." }`;
       try {
         const parsed = await gemini.generateJSON(advicePrompt, { maxOutputTokens: 250, temperature: 0.6 });
@@ -426,12 +487,12 @@ Return ONLY valid JSON: { "advice": "..." }`;
       }
     }
 
-    session.attempts.push({ quizResultId: result._id, score: result.score, passed, retakeAdvice });
+    session.attempts.push({ quizResultId: result._id, score: result.score, passed, retakeAdvice, timeAnalysis });
     session.phase     = 'completed';
     session.updatedAt = new Date();
     await session.save();
 
-    res.json({ success: true, passed, score: result.score, passThreshold: session.passThreshold, retakeAdvice });
+    res.json({ success: true, passed, score: result.score, passThreshold: session.passThreshold, retakeAdvice, timeAnalysis });
   } catch (err) {
     console.error('[exammode] report-result error:', err.message);
     res.status(500).json({ error: `Failed to report result: ${err.message || 'unknown'}` });

@@ -7,6 +7,7 @@ const QuizResult = require('../models/QuizResult');
 const Quiz = require('../models/Quiz');
 const StudyPlan = require('../models/StudyPlan');
 const FlashcardSet = require('../models/FlashcardSet');
+const ActivityLog = require('../models/ActivityLog');
 
 const { gemini, capText } = require('../utils/ai');
 const { resolveSpecificSubject } = require('../utils/subjectResolver');
@@ -186,6 +187,12 @@ router.get('/sid-iq', auth, async (req, res) => {
         required: 'weekly_group',
       });
     }
+
+    // Fire-and-forget usage tracking — SID's IQ has no collection of its
+    // own to count from, so the admin feature-usage overview reads this
+    // off the shared ActivityLog instead. Never allowed to block or fail
+    // the actual feature.
+    ActivityLog.create({ userId, action: 'sidiq_viewed', entityType: 'user' }).catch(() => {});
 
     const [user, results] = await Promise.all([
       User.findById(userId),

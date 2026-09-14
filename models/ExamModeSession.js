@@ -41,6 +41,16 @@ const ExamModeSessionSchema = new mongoose.Schema({
     score:        Number,
     passed:       Boolean,
     retakeAdvice: { type: String, default: '' },
+    // Per-topic time spent, derived from QuizResult.timePerQuestion — lets
+    // the student (and the retake-advice prompt) see not just what they
+    // got wrong, but what took suspiciously long even when they got it
+    // right, since that's usually a sign of shaky understanding too.
+    timeAnalysis: [{
+      topic:          String,
+      avgTimeSeconds: Number,
+      correct:        Boolean,
+      slow:           Boolean,
+    }],
     createdAt:    { type: Date, default: Date.now },
   }],
 

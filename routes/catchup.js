@@ -123,37 +123,39 @@ router.post('/create', auth, async (req, res) => {
       ? `The class material is attached as a PDF file — read all text AND any diagrams, charts, tables, photos, or images it contains.`
       : `Class material:\n${combinedText}`;
 
-    const summaryPrompt = `You are an expert, encouraging tutor helping a student catch up on a ${subject} class they missed.
+    const summaryPrompt = `You are an expert, encouraging tutor giving a student a complete, deep walkthrough of ${subject} material — either to catch up on a class they missed, or to thoroughly understand it before an exam.
 
 ${materialSection}
 
-TASK: Teach this student the material as if they weren't there — clear, plain language, genuinely explanatory.
+TASK: Teach this student EVERY distinct point in the material, thoroughly — not just the 3-4 headline ideas. Go through it as if running a full one-on-one tutoring session covering the whole document, so they finish genuinely understanding it, not just aware of it exists.
+
+For every point, make it stick: use a vivid analogy, a real-world comparison, or a concrete worked example ("picture it like...", "for example...", "think of it as...") alongside the plain explanation — don't just restate facts, illustrate them.
 
 Return ONLY valid JSON (no markdown, no extra text):
 {
-  "overview": "2-3 sentence plain-language introduction to what this class covered and why it matters",
+  "overview": "2-3 sentence plain-language introduction to what this material covers and why it matters",
   "keyConcepts": [
-    { "heading": "Concept name", "explanation": "Clear explanation in plain language, 2-4 sentences, as if teaching someone who's never seen this before" }
+    { "heading": "Concept name", "explanation": "A genuine teaching explanation, 3-6 sentences, including a vivid analogy or worked example — as if tutoring someone who's never seen this before" }
   ],
   "recap": "A short, memorable summary of the most important takeaways, written as a quick revision recap"${extractionMode === 'vision' ? `,
   "transcript": "A thorough, detailed prose transcript of everything in the material — all text content plus a full written description of every diagram, chart, table, or image (what it shows, its labels, and what it demonstrates) — detailed enough that someone who never saw the PDF could fully understand it from this transcript alone. This will be used later to generate quiz questions and flashcards, so be comprehensive."` : ''}
 }
 
 RULES:
-- keyConcepts: 3 to 6 entries, covering the actual distinct concepts in the material
-- Explanations must genuinely teach the concept, not just restate the heading
-- Keep it focused and readable — no filler`;
+- keyConcepts: cover EVERY distinct point/idea in the material — as many entries as genuinely needed (typically 10-25 for real course material), not a small curated highlight reel. Don't pad by splitting one idea into two just to inflate the count, and don't skip real content to stay short.
+- Every explanation must include an illustrative analogy or example, not just a restated fact
+- Order them the way a tutor would actually teach them, building on what came before`;
 
     let summary;
     try {
       const parsed = extractionMode === 'vision'
-        ? await gemini.generateJSONFromFiles(summaryPrompt, visionFiles, { maxOutputTokens: 4096, temperature: 0.5 })
-        : await gemini.generateJSON(summaryPrompt, { maxOutputTokens: 2048, temperature: 0.5 });
+        ? await gemini.generateJSONFromFiles(summaryPrompt, visionFiles, { maxOutputTokens: 8192, temperature: 0.5 })
+        : await gemini.generateJSON(summaryPrompt, { maxOutputTokens: 8192, temperature: 0.5 });
       const keyConcepts = Array.isArray(parsed.keyConcepts)
         ? parsed.keyConcepts
             .map(c => ({ heading: String(c.heading || '').trim(), explanation: String(c.explanation || '').trim() }))
             .filter(c => c.heading && c.explanation)
-            .slice(0, 8)
+            .slice(0, 25)
         : [];
       summary = {
         overview: String(parsed.overview || '').trim(),

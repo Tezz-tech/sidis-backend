@@ -7,6 +7,7 @@ const QuizResult = require('../models/QuizResult');
 const Quiz    = require('../models/Quiz');
 const TopicMastery = require('../models/TopicMastery');
 const StudyPlan = require('../models/StudyPlan');
+const ActivityLog = require('../models/ActivityLog');
 const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
 const {
   BADGE_DEFS, LEVEL_THRESHOLDS, POWERUP_COSTS,
@@ -836,6 +837,12 @@ Return JSON: { "reply": "...", "suggestedRoute": "/exact-route-from-list-or-null
     if (tutorChatDailyLimit !== Infinity) {
       await User.updateOne({ _id: userId }, { $set: { tutorChatCount: usedToday + 1, tutorChatCountDate: new Date() } });
     }
+
+    // Fire-and-forget usage tracking — tutorChatCount above resets daily
+    // (it's a rate-limit counter, not a history), so this is the only
+    // record of lifetime Study Buddy usage for the admin feature-usage
+    // overview. Never allowed to block or fail the actual chat reply.
+    ActivityLog.create({ userId, action: 'tutor_chat_message', entityType: 'user' }).catch(() => {});
 
     res.json({ success: true, reply, suggestedRoute, suggestedLabel });
   } catch (err) {

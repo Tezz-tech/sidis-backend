@@ -9,6 +9,10 @@ const QuizResult = require("../models/QuizResult");
 const FlashcardSet = require("../models/FlashcardSet");
 const ActivityLog = require("../models/ActivityLog");
 const Subscription = require("../models/Subscription");
+const CatchUpSession = require("../models/CatchUpSession");
+const ExamModeSession = require("../models/ExamModeSession");
+const StudyPlan = require("../models/StudyPlan");
+const ExamForecast = require("../models/ExamForecast");
 const { extractPdfText, pdfParseAvailable } = require("../utils/pdfExtract");
 const mammoth = require("mammoth");
 const adminAuth = require("../middlewares/adminAuth");
@@ -985,6 +989,79 @@ router.delete('/contact-messages/:id', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete message' });
+  }
+});
+
+// ==================== FEATURE USAGE OVERVIEW ====================
+// Every feature that has its own collection (Quiz, FlashcardSet,
+// CatchUpSession, ExamModeSession, StudyPlan, ExamForecast) is counted
+// directly from it. SID's IQ and Study Buddy/tutor-chat have no persisted
+// records of their own anywhere in the app — they're logged to the shared
+// ActivityLog instead (see the sidiq_viewed / tutor_chat_message writes in
+// routes/dashboard.js and routes/gamification.js), grouped here the same way.
+async function usageFor(Model, match, dateField = 'createdAt') {
+  // Some collections (e.g. public/anonymous FlashcardSets) allow a null
+  // userId — exclude those from "who's using this," since there's no user
+  // to attribute the usage to.
+  const combinedMatch = { userId: { $ne: null }, ...(match || {}) };
+  const grouped = await Model.aggregate([
+    { $match: combinedMatch },
+    { $group: { _id: '$userId', count: { $sum: 1 }, lastUsed: { $max: `$${dateField}` } } },
+    { $sort: { count: -1 } },
+  ]);
+  const totalCount = grouped.reduce((s, g) => s + g.count, 0);
+  return { totalCount, uniqueUsers: grouped.length, top: grouped.slice(0, 5) };
+}
+
+router.get('/features/summary', async (req, res) => {
+  try {
+    const [
+      quizzes, flashcards, catchup, exammode, studyplanner, forecaster,
+      sidiq, tutorchat, totalUsers, examCompleted, examPassed,
+    ] = await Promise.all([
+      usageFor(Quiz, { isAdminCreated: false }),
+      usageFor(FlashcardSet),
+      usageFor(CatchUpSession),
+      usageFor(ExamModeSession),
+      usageFor(StudyPlan),
+      usageFor(ExamForecast),
+      usageFor(ActivityLog, { action: 'sidiq_viewed' }, 'timestamp'),
+      usageFor(ActivityLog, { action: 'tutor_chat_message' }, 'timestamp'),
+      User.countDocuments(),
+      ExamModeSession.countDocuments({ phase: 'completed' }),
+      ExamModeSession.countDocuments({ 'attempts.passed': true }),
+    ]);
+
+    const features = [
+      { key: 'quizzes',      label: 'Quizzes Created',     icon: 'BookOpen',       ...quizzes },
+      { key: 'flashcards',   label: 'Flashcard Sets',      icon: 'Layers',         ...flashcards },
+      { key: 'catchup',      label: 'Study Catch-Up',      icon: 'GraduationCap',  ...catchup },
+      { key: 'exammode',     label: 'Exam Mode',           icon: 'Zap',            ...exammode, extra: { completedExams: examCompleted, passedExams: examPassed } },
+      { key: 'studyplanner', label: 'Study Planner',       icon: 'CalendarCheck',  ...studyplanner },
+      { key: 'forecaster',   label: 'Question Forecaster', icon: 'TrendingUp',     ...forecaster },
+      { key: 'sidiq',        label: "SID's IQ",            icon: 'Brain',          ...sidiq },
+      { key: 'tutorchat',    label: 'Study Buddy Chat',    icon: 'MessageCircle',  ...tutorchat },
+    ];
+
+    // Resolve every top-user id across every feature in one batch query
+    // instead of N+1 lookups.
+    const allTopIds = [...new Set(features.flatMap(f => f.top.map(t => String(t._id))))];
+    const users = await User.find({ _id: { $in: allTopIds } }).select('fullName email').lean();
+    const userMap = Object.fromEntries(users.map(u => [String(u._id), u]));
+    features.forEach(f => {
+      f.top = f.top.map(t => ({
+        userId:   t._id,
+        fullName: userMap[String(t._id)]?.fullName || 'Unknown user',
+        email:    userMap[String(t._id)]?.email || '',
+        count:    t.count,
+        lastUsed: t.lastUsed,
+      }));
+    });
+
+    res.json({ success: true, totalUsers, features });
+  } catch (err) {
+    console.error('Feature usage summary error:', err);
+    res.status(500).json({ error: 'Failed to fetch feature usage summary' });
   }
 });
 
