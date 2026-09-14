@@ -6,6 +6,7 @@ const TopicMastery = require('../models/TopicMastery');
 const StudyPlan    = require('../models/StudyPlan');
 const QuizResult   = require('../models/QuizResult');
 const Quiz         = require('../models/Quiz');
+const User         = require('../models/User');
 const {
   detectWeakPatterns, runAdaptiveCycle, needsAdaptiveAction,
 } = require('../utils/adaptiveEngine');
@@ -15,9 +16,13 @@ const {
 // "Sid IQ" page's topic-level (not just subject-level) weak-spot list.
 router.get('/insights', auth, async (req, res) => {
   try {
-    const topics = await TopicMastery.find({ userId: req.user.userId })
-      .sort({ masteryScore: 1 })
-      .lean();
+    const [topics, user] = await Promise.all([
+      TopicMastery.find({ userId: req.user.userId }).sort({ masteryScore: 1 }).lean(),
+      User.findById(req.user.userId).select('sidIQInterests').lean(),
+    ]);
+    const interests = user?.sidIQInterests || [];
+    const matchesInterest = (subject) => interests.length === 0
+      || interests.some(i => i.toLowerCase() === (subject || '').toLowerCase());
 
     const weakTopics = topics
       .filter(t => t.status === 'weak' || t.consecutiveMisses >= 2)
@@ -28,7 +33,15 @@ router.get('/insights', auth, async (req, res) => {
         consecutiveMisses: t.consecutiveMisses,
         status: t.status,
         easyDigest: t.easyDigest || null,
-      }));
+        // Whether this topic's subject is one the student said they're
+        // focused on via SID's IQ — lets the page agree with itself instead
+        // of showing weak-topic call-outs unrelated to stated interests.
+        matchesInterest: matchesInterest(t.subject),
+      }))
+      // Interest-aligned topics surface first (stable sort keeps the
+      // existing weakest-first ordering within each group); a no-op when
+      // the student hasn't set any interests yet.
+      .sort((a, b) => (b.matchesInterest === a.matchesInterest) ? 0 : (b.matchesInterest ? 1 : -1));
 
     const autoActions = topics
       .filter(t => t.lastAutoActionAt)
@@ -120,6 +133,14 @@ async function dailySweep(req, res) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
+  // A student with many stale weak topics shouldn't get flooded with AI
+  // practice quizzes and study-plan sessions from a single silent sweep —
+  // cap how many auto-actions fire per user per run, and when trimming to
+  // that cap, prefer topics in subjects the student actually said they're
+  // focused on via SID's IQ (falls back to weakest-first when they haven't
+  // set any interests, i.e. unchanged behaviour for those users).
+  const MAX_ACTIONS_PER_USER = 3;
+
   try {
     const userIds = await StudyPlan.distinct('userId', {
       generated: true,
@@ -131,10 +152,28 @@ async function dailySweep(req, res) {
 
     for (const userId of userIds) {
       const stale = await detectWeakPatterns(userId);
-      if (stale.length === 0) continue;
+      const actionable = stale.filter(needsAdaptiveAction);
+      if (actionable.length === 0) continue;
       usersProcessed++;
-      for (const topicDoc of stale) {
-        if (!needsAdaptiveAction(topicDoc)) continue;
+
+      const user = await User.findById(userId).select('sidIQInterests').lean();
+      const interests = user?.sidIQInterests || [];
+      const matchesInterest = (subject) => interests.length === 0
+        || interests.some(i => i.toLowerCase() === (subject || '').toLowerCase());
+
+      // Stable-sort interest matches first (detectWeakPatterns has no
+      // guaranteed ordering, so also break ties by lowest masteryScore —
+      // weakest topics take priority within each group).
+      const prioritized = actionable
+        .slice()
+        .sort((a, b) => {
+          const aMatch = matchesInterest(a.subject), bMatch = matchesInterest(b.subject);
+          if (aMatch !== bMatch) return aMatch ? -1 : 1;
+          return (a.masteryScore || 0) - (b.masteryScore || 0);
+        })
+        .slice(0, MAX_ACTIONS_PER_USER);
+
+      for (const topicDoc of prioritized) {
         await runAdaptiveCycle(userId, topicDoc.subject, topicDoc.topic);
         actionsRun++;
       }

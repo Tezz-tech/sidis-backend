@@ -70,7 +70,7 @@ router.post('/parse-timetable', auth, async (req, res) => {
     const file = req.files?.image || Object.values(req.files || {})[0];
     if (!file) return res.status(400).json({ error: 'Send an image file (field: image).' });
 
-    const prompt = `You are reading a photo or scan of a student's exam timetable. Extract the exam schedule from it.
+    const prompt = `You are reading a photo or scan of a student's exam timetable. It may be a real phone photo — angled, slightly blurry, with glare, shadows, or a printed/handwritten mix — do your best to read through those imperfections rather than giving up. Extract the exam schedule from it.
 
 TASK:
 - Identify an overall name for this exam sitting (e.g. "WAEC 2026", "First Semester Exams", "Mock Exams" — infer a reasonable short title from the document if none is printed verbatim)

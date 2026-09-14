@@ -738,7 +738,7 @@ router.post("/quizzes/generate", async (req, res) => {
     if (!useVision && !extractedText.trim()) return res.status(400).json({ error: "No readable text found" });
 
     const safeText = capText(extractedText, 60000);
-    const prompt = `Generate ${numQuestions} multiple-choice questions.\nSubject: ${subject}. Difficulty: ${difficulty}.\nReturn ONLY a valid JSON array, no markdown:\n[{"question":"...","options":["A","B","C","D"],"correctAnswer":0}]\n${useVision ? "The content is attached as a PDF file — read all text AND any diagrams, charts, tables, or images it contains." : `Content:\n${safeText}`}`.trim();
+    const prompt = `Generate ${numQuestions} multiple-choice questions.\nSubject: ${subject}. Difficulty: ${difficulty}.\nIf the content contains any calculations or numeric worked examples, test them properly — don't skip calculation-based content.\nReturn ONLY a valid JSON array, no markdown:\n[{"question":"...","options":["A","B","C","D"],"correctAnswer":0}]\n${useVision ? "The content is attached as a PDF file — read all text AND any diagrams, charts, tables, or images it contains." : `Content:\n${safeText}`}`.trim();
 
     let questions;
     try {

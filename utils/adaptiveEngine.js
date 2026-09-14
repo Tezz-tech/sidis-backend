@@ -160,11 +160,16 @@ Return JSON: { "digest": "..." }`;
 }
 
 // ── Insert a session into the student's nearest active study plan ───────────
+// Only patches a plan whose subject list actually includes this subject —
+// a repeated miss on a one-off quiz in a subject that has nothing to do
+// with the exam this plan is for should never silently insert an
+// off-topic session into it.
 async function patchStudyPlanWithTopic(userId, subject, topic, quiz) {
   const plan = await StudyPlan.findOne({
     userId,
     generated: true,
     examDate: { $gt: new Date() },
+    subjects: { $regex: new RegExp(`^${subject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
   }).sort({ examDate: 1 });
   if (!plan) return null;
 

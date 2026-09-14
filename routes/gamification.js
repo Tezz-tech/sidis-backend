@@ -8,7 +8,7 @@ const Quiz    = require('../models/Quiz');
 const TopicMastery = require('../models/TopicMastery');
 const StudyPlan = require('../models/StudyPlan');
 const ActivityLog = require('../models/ActivityLog');
-const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
+const { getUserPlan, getPlanFeatures, PLAN_NAMES, FEATURE_REQUIRED_PLAN } = require('../utils/subscription');
 const {
   BADGE_DEFS, LEVEL_THRESHOLDS, POWERUP_COSTS,
   getLevelInfo, checkNewBadges, awardXP,
@@ -757,7 +757,7 @@ router.post('/tutor-chat', auth, async (req, res) => {
     const userId = req.user.userId;
     const [planKey, user, results, weakTopics, plan] = await Promise.all([
       getUserPlan(userId),
-      User.findById(userId).select('studyBuddyName xp level currentStreak tutorChatCount tutorChatCountDate'),
+      User.findById(userId).select('fullName studyBuddyName xp level currentStreak tutorChatCount tutorChatCountDate'),
       QuizResult.find({ userId }).sort({ createdAt: -1 }).limit(10).lean(),
       TopicMastery.find({ userId, status: 'weak' }).sort({ masteryScore: 1 }).limit(5).lean(),
       StudyPlan.findOne({ userId, examDate: { $gt: new Date() } }).sort({ examDate: 1 }).lean(),
@@ -794,23 +794,44 @@ router.post('/tutor-chat', auth, async (req, res) => {
     const planStr = plan
       ? `"${plan.examName}" on ${new Date(plan.examDate).toDateString()} — ${plan.schedule.filter(s => s.completed).length}/${plan.schedule.length} sessions done`
       : 'no active study plan';
+    const firstName = (user?.fullName || '').trim().split(/\s+/)[0] || '';
+
+    // What this student's CURRENT plan doesn't unlock yet — lets the bot make
+    // a real, specific, correctly-priced upgrade pitch when a natural
+    // opening comes up, instead of either staying silent or guessing.
+    const planFeatures = getPlanFeatures(planKey);
+    const lockedFeatures = Object.entries(FEATURE_REQUIRED_PLAN)
+      .filter(([key]) => !planFeatures[key])
+      .map(([key, requiredPlan]) => {
+        const labels = {
+          moreTools: 'Study Planner, Study Catch-Up, and other extra tools', studyJourney: 'Study Journey',
+          examMode: 'Exam Mode (guided walkthrough + timed exam)', studyBuddy: 'unlimited AI tutor chat',
+          forecaster: 'the Question Forecaster', sidIQ: "SID's IQ adaptive learning profile",
+        };
+        return `${labels[key] || key} (needs ${requiredPlan})`;
+      });
 
     const historyText = Array.isArray(history)
       ? history.slice(-6).map(h => `${h.role === 'user' ? 'Student' : 'Tutor'}: ${h.content}`).join('\n')
       : '';
 
-    const prompt = `You are ${user?.studyBuddyName || 'Siddy'}, a friendly, encouraging personal AI tutor AND app guide inside a study app called Sidis.
+    const prompt = `You are ${user?.studyBuddyName || 'Siddy'}, a warm, upbeat, genuinely engaging personal AI tutor AND app guide inside a study app called Sidis — think of a great tutor who also happens to know the product inside out and isn't shy about recommending the right upgrade when it genuinely helps.
 
 Student context (ground your answer in this — don't ask for info you already have here):
-- Recent quiz scores: ${recentScoresStr}
+${firstName ? `- Name: ${firstName}\n` : ''}- Recent quiz scores: ${recentScoresStr}
 - Average score (last 10 quizzes): ${avgScore !== null ? avgScore + '%' : 'no data yet'}
 - Weakest topics: ${weakStr}
 - Current streak: ${user?.currentStreak || 0} days, Level ${user?.level || 1}, ${user?.xp || 0} XP
 - Active study plan: ${planStr}
+- Current plan: ${PLAN_NAMES[planKey] || 'Free'}${lockedFeatures.length ? `\n- NOT yet unlocked on their plan: ${lockedFeatures.join('; ')}` : ' (already has full access to everything)'}
 ${historyText ? `\nRecent conversation:\n${historyText}\n` : ''}
 Student's new message: "${message.trim()}"
 
+BE INTERACTIVE, not a one-way answer machine: use their name naturally sometimes, react to their actual situation (celebrate a streak or a good score, show real concern about a weak topic), vary your energy instead of sounding the same every time, and — when it fits the moment — end with a short, genuine follow-up question that moves the conversation forward (e.g. "want me to quiz you on that right now?") rather than just stopping. Don't force a question onto every single reply if the conversation doesn't call for one.
+
 Reply as their tutor — be specific and reference their real data above where relevant (e.g. if asked why they scored low, name a real weak topic; if asked what to review next, recommend one of their actual weak topics). If asked to generate a revision question, include one short question and its answer directly in your reply. Keep it conversational, under 120 words, no markdown headers.
+
+YOU ARE ALSO A SHARP, NATURAL SALES REP for Sidis' paid plans — genuinely, not pushily. When a real opening comes up (they hit a limit, ask about a feature they don't have, mention exam stress a locked feature would solve, or their study pattern shows they'd clearly benefit), mention the specific plan and price from "NOT yet unlocked" above and say concretely what it'd do for THEM right now — never a generic "consider upgrading!", always tied to their actual moment. Never bring it up in a reply that has nothing to do with it, never more than once every few messages, and never if they're already on full access.
 
 You are also the app's guide. If the student asks how to do something, where to find a feature, or seems like they'd benefit from a specific page right now, mention it naturally in your reply AND set suggestedRoute/suggestedLabel below so the app can show them a button to jump straight there. Only pick a route when it's genuinely the right next step — leave both null for plain conversation. Pick ONE route from this list that best matches:
 ${APP_PAGES.map(p => `- ${p.route} — "${p.label}": ${p.desc}`).join('\n')}

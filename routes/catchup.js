@@ -47,7 +47,7 @@ async function extractTextFromFiles(files) {
     try {
       const text = (await extractPdfText(file.data)).trim();
       if (!text) { console.warn(`[catchup] No text in ${file.name} (likely scanned image)`); continue; }
-      chunks.push(`=== ${file.name} ===\n${text.slice(0, 8000)}`);
+      chunks.push(`=== ${file.name} ===\n${text.slice(0, 40000)}`);
       meta.push({ name: file.name, textLength: text.length });
     } catch (e) {
       console.warn(`[catchup] pdf-parse failed for ${file.name}: ${e.message}`);
@@ -86,7 +86,7 @@ router.post('/create', auth, async (req, res) => {
 
     // ── Path A: pasted text (JSON body) — always text-only, no images possible ─
     if (req.body?.pastedText?.trim()) {
-      combinedText  = req.body.pastedText.trim().slice(0, 20000);
+      combinedText  = req.body.pastedText.trim().slice(0, 100000);
       uploadedFiles = [{ name: 'Pasted notes', textLength: combinedText.length }];
 
     // ── Path B: file upload (multipart) ──────────────────────────────────────
@@ -100,7 +100,7 @@ router.post('/create', auth, async (req, res) => {
       } else {
         try {
           const { chunks, meta } = await extractTextFromFiles(fileList);
-          combinedText  = chunks.join('\n\n').slice(0, 20000);
+          combinedText  = chunks.join('\n\n').slice(0, 100000);
           uploadedFiles = meta;
         } catch (extractErr) {
           return res.status(422).json({ error: extractErr.message });
@@ -114,65 +114,100 @@ router.post('/create', auth, async (req, res) => {
       return res.status(422).json({ error: 'No usable text found. Please check your files or paste the class notes directly.' });
 
     // ── AI: teach the material back to the student ────────────────────────────
-    // Vision mode also asks for a full prose transcript (including describing
-    // diagrams/charts in words) — the later generate-quiz/generate-flashcards
-    // steps are separate requests with no file re-upload, so they read
-    // session.combinedText same as always; this is what makes that keep
-    // working without needing the original files again.
-    const materialSection = extractionMode === 'vision'
-      ? `The class material is attached as a PDF file — read all text AND any diagrams, charts, tables, photos, or images it contains.`
-      : `Class material:\n${combinedText}`;
+    // Batched (like exam/quiz generation elsewhere) so a genuinely long,
+    // multi-page document gets covered in full instead of capping out at
+    // whatever a single AI call's output budget allows — each batch is told
+    // what's already been covered and asked to keep going, not restart.
+    const SUMMARY_MAX_CONCEPTS = 60;
+    const SUMMARY_BATCH_SIZE   = 15;
+    const SUMMARY_MAX_BATCHES  = 4; // 4 × 15 = 60
 
-    const summaryPrompt = `You are an expert, encouraging tutor giving a student a complete, deep walkthrough of ${subject} material — either to catch up on a class they missed, or to thoroughly understand it before an exam.
+function buildSummaryPrompt(usingVisionFiles, askFor, coveredHeadings, includeMeta) {
+      // Batch 0 in vision mode reads the raw PDF directly; every later batch
+      // (and all of text mode) reasons over combinedText as plain text — by
+      // then combinedText already holds the transcript from batch 0, so this
+      // must be re-evaluated per call, never precomputed once up front.
+      const materialSection = usingVisionFiles
+        ? `The class material is attached as a PDF file — read all text AND any diagrams, charts, tables, photos, or images it contains.`
+        : `Class material:\n${combinedText}`;
+      return `You are an expert, encouraging tutor giving a student a complete, deep walkthrough of ${subject} material — either to catch up on a class they missed, or to thoroughly understand it before an exam.
 
 ${materialSection}
 
-TASK: Teach this student EVERY distinct point in the material, thoroughly — not just the 3-4 headline ideas. Go through it as if running a full one-on-one tutoring session covering the whole document, so they finish genuinely understanding it, not just aware of it exists.
+TASK: Teach this student EVERY distinct point in the material, thoroughly, covering ALL pages/sections — not just the first few or the headline ideas. Go through it as if running a full one-on-one tutoring session covering the WHOLE document from start to end, so they finish genuinely understanding all of it, not just the beginning.
 
 For every point, make it stick: use a vivid analogy, a real-world comparison, or a concrete worked example ("picture it like...", "for example...", "think of it as...") alongside the plain explanation — don't just restate facts, illustrate them.
 
+If the material contains ANY calculations, formulas, numeric worked examples, or quantitative problems, you MUST explain them in full: show every step of the working, not just the formula or the final answer — walk through it the way a tutor would at a whiteboard. Never skip over or gloss past numeric/calculation content just because it's harder to explain in prose.
+${coveredHeadings.length ? `\nAlready taught so far: ${coveredHeadings.join('; ')}. Do NOT repeat these — continue with the NEXT distinct points in the material that haven't been covered yet (keep working further into the document, including later pages/sections).` : ''}
+
 Return ONLY valid JSON (no markdown, no extra text):
-{
-  "overview": "2-3 sentence plain-language introduction to what this material covers and why it matters",
+{${includeMeta ? `
+  "overview": "2-3 sentence plain-language introduction to what this material covers and why it matters",` : ''}
   "keyConcepts": [
-    { "heading": "Concept name", "explanation": "A genuine teaching explanation, 3-6 sentences, including a vivid analogy or worked example — as if tutoring someone who's never seen this before" }
-  ],
-  "recap": "A short, memorable summary of the most important takeaways, written as a quick revision recap"${extractionMode === 'vision' ? `,
-  "transcript": "A thorough, detailed prose transcript of everything in the material — all text content plus a full written description of every diagram, chart, table, or image (what it shows, its labels, and what it demonstrates) — detailed enough that someone who never saw the PDF could fully understand it from this transcript alone. This will be used later to generate quiz questions and flashcards, so be comprehensive."` : ''}
+    { "heading": "Concept name", "explanation": "A genuine teaching explanation, 3-6 sentences (longer if explaining a calculation — show full working), including a vivid analogy or worked example — as if tutoring someone who's never seen this before" }
+  ]${includeMeta ? `,
+  "recap": "A short, memorable summary of the most important takeaways, written as a quick revision recap"${usingVisionFiles ? `,
+  "transcript": "A thorough, detailed prose transcript of EVERYTHING in the material, start to end — all text content plus a full written description of every diagram, chart, table, or image (what it shows, its labels, what it demonstrates), and the COMPLETE working for every calculation or numeric example shown, not just the final figure. Detailed enough that someone who never saw the PDF could fully understand it from this transcript alone. This will be used later to generate quiz questions and flashcards, so be comprehensive and do not cut it short."` : ''}` : ''}
 }
 
 RULES:
-- keyConcepts: cover EVERY distinct point/idea in the material — as many entries as genuinely needed (typically 10-25 for real course material), not a small curated highlight reel. Don't pad by splitting one idea into two just to inflate the count, and don't skip real content to stay short.
+- keyConcepts: write up to ${askFor} — but only if the material genuinely still has that many distinct, uncovered points left. Return fewer rather than pad with filler or repeat something already taught.
+- If everything in the material has already been covered in "Already taught so far", return an EMPTY keyConcepts array — do NOT write a wrap-up/completion entry like "all material covered", that is not a real teaching point
 - Every explanation must include an illustrative analogy or example, not just a restated fact
 - Order them the way a tutor would actually teach them, building on what came before`;
+    }
 
-    let summary;
+    let allConcepts = [];
+    let overview = '', recap = '';
+    let coveredHeadings = [];
     try {
-      const parsed = extractionMode === 'vision'
-        ? await gemini.generateJSONFromFiles(summaryPrompt, visionFiles, { maxOutputTokens: 8192, temperature: 0.5 })
-        : await gemini.generateJSON(summaryPrompt, { maxOutputTokens: 8192, temperature: 0.5 });
-      const keyConcepts = Array.isArray(parsed.keyConcepts)
-        ? parsed.keyConcepts
-            .map(c => ({ heading: String(c.heading || '').trim(), explanation: String(c.explanation || '').trim() }))
-            .filter(c => c.heading && c.explanation)
-            .slice(0, 25)
-        : [];
-      summary = {
-        overview: String(parsed.overview || '').trim(),
-        keyConcepts,
-        recap:    String(parsed.recap || '').trim(),
-      };
-      if (!summary.overview && keyConcepts.length === 0)
-        throw new Error('AI returned an empty summary — try again.');
+      for (let batch = 0; batch < SUMMARY_MAX_BATCHES && allConcepts.length < SUMMARY_MAX_CONCEPTS; batch++) {
+        const askFor = Math.min(SUMMARY_BATCH_SIZE, SUMMARY_MAX_CONCEPTS - allConcepts.length);
+        const includeMeta = batch === 0;
+        // Only the FIRST batch (in vision mode) needs the raw files — once we
+        // have a text transcript back, every later batch just reasons over
+        // that text, same as text-mode uploads always did.
+        const usingVisionFiles = extractionMode === 'vision' && batch === 0;
+        const prompt = buildSummaryPrompt(usingVisionFiles, askFor, coveredHeadings, includeMeta);
 
-      if (extractionMode === 'vision') {
-        combinedText = String(parsed.transcript || '').trim().slice(0, 20000);
-        if (!combinedText) throw new Error('AI could not read this PDF — try the "Text Only" option or paste the notes instead.');
+        const parsed = usingVisionFiles
+          ? await gemini.generateJSONFromFiles(prompt, visionFiles, { maxOutputTokens: 8192, temperature: 0.5 })
+          : await gemini.generateJSON(prompt, { maxOutputTokens: 8192, temperature: 0.5 });
+
+        if (includeMeta) {
+          overview = String(parsed.overview || '').trim();
+          recap    = String(parsed.recap || '').trim();
+          if (extractionMode === 'vision') {
+            combinedText = String(parsed.transcript || '').trim().slice(0, 100000);
+            if (!combinedText) throw new Error('AI could not read this PDF — try the "Text Only" option or paste the notes instead.');
+          }
+        }
+
+        const batchConcepts = Array.isArray(parsed.keyConcepts)
+          ? parsed.keyConcepts
+              .map(c => ({ heading: String(c.heading || '').trim(), explanation: String(c.explanation || '').trim() }))
+              .filter(c => c.heading && c.explanation)
+          : [];
+        if (batchConcepts.length === 0) break; // material exhausted
+        allConcepts.push(...batchConcepts);
+        coveredHeadings.push(...batchConcepts.map(c => c.heading));
+        if (batch > 0 && batchConcepts.length < askFor * 0.5) break;
       }
     } catch (aiErr) {
       console.error('[catchup] summary AI error:', aiErr.message);
-      return res.status(500).json({ error: `AI failed to summarise this material: ${aiErr.message}` });
+      if (allConcepts.length === 0)
+        return res.status(500).json({ error: `AI failed to summarise this material: ${aiErr.message}` });
+      // Keep whatever earlier batches already produced rather than losing it all
     }
+
+    const summary = {
+      overview,
+      keyConcepts: allConcepts.slice(0, SUMMARY_MAX_CONCEPTS),
+      recap,
+    };
+    if (!summary.overview && summary.keyConcepts.length === 0)
+      return res.status(500).json({ error: 'AI returned an empty summary — try again.' });
 
     const session = await CatchUpSession.create({
       userId: req.user.userId,
@@ -211,21 +246,22 @@ function buildCatchupQuizPrompt(session, askFor, coveredTopics) {
 Based ONLY on the class material below, generate multiple-choice questions to thoroughly check the student's understanding of what they missed.
 
 Class Material:
-${session.combinedText.slice(0, 12000)}
+${session.combinedText.slice(0, 40000)}
 ${coveredTopics.length ? `\nQuestions already written covering: ${coveredTopics.join('; ')}. Do NOT repeat these — cover different sub-topics or angles still untested.` : ''}
 
 RULES:
 - Each question has exactly 4 options (A, B, C, D), one correct answer, plausible distractors
 - correctAnswer is the 0-based index of the correct option
-- Include a brief explanation for the correct answer
 - Cover the material broadly and in depth — identify every distinct concept or section and test it, don't consolidate everything into a handful of broad questions
+- If a question involves a calculation, the "explanation" MUST show the full step-by-step working that arrives at the correct option, not just state the formula or restate the answer
 
 Return ONLY valid JSON:
 {
   "questions": [
-    { "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "...", "topic": "specific sub-topic tested" }
+    { "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "workingScratchpad": "for numeric/calculation questions: work the answer out step by step here AND independently recompute it once more to confirm — messy work-in-progress is fine in THIS field only, it is never shown to the student", "explanation": "the clean, final, confident explanation shown to the student — for calculation questions, show the full working leading to the answer; never mention the scratchpad or any earlier mistake", "topic": "specific sub-topic tested" }
   ]
 }
+CRITICAL for accuracy: for every numeric/calculation question, use "workingScratchpad" to verify the answer twice before settling on the 4 options — make sure exactly one option matches your verified answer exactly, and "explanation" must be derived strictly from that verified working, with zero hesitation or self-correction visible in it.
 Write up to ${askFor} questions — but only if the material genuinely supports that many distinct, non-repetitive questions. Return fewer rather than pad with filler.`;
 }
 
@@ -390,12 +426,12 @@ router.post('/:id/chat', auth, async (req, res) => {
 
     const prompt = `You are a patient, expert tutor helping a student catch up on ${session.subject} material they missed, grounded in this content:
 
-${session.combinedText.slice(0, 7000)}
+${session.combinedText.slice(0, 40000)}
 ${session.summary?.overview ? `\nSummary already given to the student: ${session.summary.overview}` : ''}
 ${historyText ? `\nConversation so far:\n${historyText}\n` : ''}
 Student's new message: "${message.trim()}"
 
-Answer their question clearly and helpfully, drawing only on the material above. If they seem to misunderstand something, gently correct it. Keep replies conversational, under 120 words, no markdown headers.
+Answer their question clearly and helpfully, drawing only on the material above. If they seem to misunderstand something, gently correct it. If the question involves a calculation or numeric working, show the full step-by-step working, not just the final answer. Keep replies conversational, under 120 words (longer if walking through a calculation), no markdown headers.
 
 Return ONLY valid JSON: { "reply": "..." }`;
 
@@ -434,7 +470,7 @@ Subject: ${session.subject}
 Return ONLY a valid JSON array, no markdown:
 [{"question":"...","answer":"...","topic":"the specific sub-topic this card tests, e.g. 'Depreciation' not just '${session.subject}'"}]
 Content:
-${session.combinedText.slice(0, 15000)}`;
+${session.combinedText.slice(0, 40000)}`;
 
     let cards = [];
     try {

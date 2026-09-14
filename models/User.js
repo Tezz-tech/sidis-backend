@@ -66,6 +66,14 @@ const userSchema = new mongoose.Schema({
 
   // ── Ads Remover ───────────────────────────────────────
   adsRemovedUntil: { type: Date, default: null },
+
+  // ── SID's IQ subject interests ─────────────────────────
+  // The subjects the student said they want to focus on/be recommended for
+  // Sid IQ. Previously lived ONLY in browser localStorage, which meant the
+  // server-side adaptive learning engine (daily cron, weak-topic insights)
+  // had no way to know it and could act on/surface subjects the student
+  // never expressed interest in. Persisted here so both sides agree.
+  sidIQInterests: { type: [String], default: [] },
 });
 
 module.exports = mongoose.model('User', userSchema);

@@ -305,10 +305,21 @@ router.get('/sid-iq', auth, async (req, res) => {
     }
     const readinessReason = `You're ${examReadiness}% ready: ${reasonParts.join(', ')}.`;
 
-    // User's stated interest subjects (passed from the SidIQ frontend after profiling)
-    const userInterests = req.query.interests
+    // User's stated interest subjects (passed from the SidIQ frontend after
+    // profiling). Persisted to User.sidIQInterests here so the server-side
+    // adaptive learning engine (daily cron, weak-topic insights) can also
+    // see and respect it — previously this only ever lived in the browser's
+    // localStorage and the two systems disagreed on what the student cared
+    // about. Falls back to whatever was last saved when the client doesn't
+    // resend it (e.g. a future session).
+    const queryInterests = req.query.interests
       ? req.query.interests.split(',').map(s => s.trim()).filter(Boolean)
-      : [];
+      : null;
+    let userInterests = queryInterests || user.sidIQInterests || [];
+    if (queryInterests && JSON.stringify(queryInterests) !== JSON.stringify(user.sidIQInterests || [])) {
+      user.sidIQInterests = queryInterests;
+      await user.save();
+    }
 
     // Recommended quizzes — weak subjects take priority; fall back to interests; then random public
     const searchSubjects = weakSubjects.length > 0 ? weakSubjects : userInterests;

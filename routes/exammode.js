@@ -68,7 +68,7 @@ async function extractTextFromFiles(files) {
     try {
       const text = (await extractPdfText(file.data)).trim();
       if (!text) { console.warn(`[exammode] No text in ${file.name} (likely scanned image)`); continue; }
-      chunks.push(`=== ${file.name} ===\n${text.slice(0, 8000)}`);
+      chunks.push(`=== ${file.name} ===\n${text.slice(0, 40000)}`);
       meta.push({ name: file.name, textLength: text.length });
     } catch (e) {
       console.warn(`[exammode] pdf-parse failed for ${file.name}: ${e.message}`);
@@ -90,14 +90,16 @@ const MAX_EXAM_BATCHES   = 3; // 3 × 20 = 60 — kept low since the whole
 // questions per call still comfortably fits the 8192-token output budget.
 
 function buildExamPrompt(session, askFor, coveredTopics) {
-  const material  = session.combinedText.slice(0, 12000);
+  const material  = session.combinedText.slice(0, 40000);
   const qaContext = session.qaSummary ? session.qaSummary.slice(0, 3000) : '';
-  const pastQuestions = session.pastQuestionsText ? session.pastQuestionsText.slice(0, 12000) : '';
+  const pastQuestions = session.pastQuestionsText ? session.pastQuestionsText.slice(0, 20000) : '';
   return `You are a ruthless, expert examiner setting an EXTREMELY HARD, in-depth, COMPREHENSIVE exam paper for ${session.subject} — the kind only a student with genuine mastery of the entire material can pass. Mix multiple-choice (objective) and short-answer/essay (theory) questions, in whatever proportion is conventional for this subject.
 
 Base every question ONLY on the material below. Go deep: test application, edge cases, and understanding of WHY — not simple recall of facts stated verbatim. Avoid questions answerable by pattern-matching a sentence from the text; make the student actually reason.
 
 Coverage matters as much as difficulty: identify every distinct concept, section, or sub-topic in the material and write at least one substantial question on each — don't consolidate multiple distinct ideas into a handful of broad questions just to keep the count low. For material covering several distinct topics, a properly thorough exam typically runs well into the double digits, not just a handful of questions.
+
+If the material contains ANY calculations, formulas, or numeric worked examples, you MUST write questions that test them properly, and show the FULL step-by-step working in the answer — never skip, simplify away, or ignore calculation-based content just because it's harder to write a question about than prose facts.
 
 Class material:
 ${material}
@@ -108,10 +110,11 @@ ${coveredTopics.length ? `\nQuestions have already been written covering: ${cove
 Return ONLY valid JSON:
 {
   "questions": [
-    { "type": "mcq", "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "...", "topic": "specific sub-topic" },
+    { "type": "mcq", "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "workingScratchpad": "for numeric/calculation MCQs only: work the answer out step by step here AND independently recompute it once more to confirm — messy work-in-progress is fine in THIS field only, it is never shown to the student", "explanation": "the clean, final, confident explanation shown to the student — for calculation questions, show the full working leading to the answer; never mention the scratchpad or any earlier mistake", "topic": "specific sub-topic" },
     { "type": "essay", "question": "...", "modelAnswer": "...", "explanation": "...", "topic": "specific sub-topic" }
   ]
 }
+CRITICAL for MCQ accuracy: for every numeric/calculation MCQ, use "workingScratchpad" to verify the answer twice before settling on the 4 options — make sure exactly one option matches your verified answer exactly, and "explanation" must be derived strictly from that verified working, with zero hesitation or self-correction visible in it.
 Write up to ${askFor} questions — but ONLY if the material genuinely supports that many distinct, non-repetitive, in-depth questions. Return fewer rather than pad with filler or restate the same idea twice. correctAnswer is the 0-based index of the correct option, only for "mcq" questions.`;
 }
 
@@ -273,7 +276,7 @@ router.post('/create', auth, requireExamModeAccess, async (req, res) => {
     let visionFiles   = null;
 
     if (req.body?.pastedText?.trim()) {
-      combinedText  = req.body.pastedText.trim().slice(0, 20000);
+      combinedText  = req.body.pastedText.trim().slice(0, 100000);
       uploadedFiles = [{ name: 'Pasted notes', textLength: combinedText.length }];
     } else if (req.files && Object.keys(req.files).length > 0) {
       const rawFiles = req.files.docs || Object.values(req.files)[0];
@@ -285,7 +288,7 @@ router.post('/create', auth, requireExamModeAccess, async (req, res) => {
       } else {
         try {
           const { chunks, meta } = await extractTextFromFiles(fileList);
-          combinedText  = chunks.join('\n\n').slice(0, 20000);
+          combinedText  = chunks.join('\n\n').slice(0, 100000);
           uploadedFiles = meta;
         } catch (extractErr) {
           return res.status(422).json({ error: extractErr.message });
@@ -320,54 +323,87 @@ router.post('/create', auth, requireExamModeAccess, async (req, res) => {
       }
     }
 
-    const materialSection = extractionMode === 'vision'
-      ? `The course material is attached as a PDF file — read all text AND any diagrams, charts, tables, photos, or images it contains.`
-      : `Course material:\n${combinedText}`;
+    // Batched (like exam-question generation elsewhere) so a genuinely long
+    // course document gets a COMPLETE, in-depth walkthrough instead of
+    // capping out at whatever a single AI call's output budget allows —
+    // each batch is told what's already been taught and told to keep going.
+    const WALKTHROUGH_MAX_STEPS  = 30;
+    const WALKTHROUGH_BATCH_SIZE = 8;
+    const WALKTHROUGH_MAX_BATCHES = 4; // 4 × 8 = 32
 
-    const walkthroughPrompt = `You are an expert tutor preparing a student for an exam on ${subject}.
+    function buildWalkthroughPrompt(usingVisionFiles, askFor, coveredHeadings, includeMeta) {
+      // Batch 0 in vision mode reads the raw PDF directly; every later batch
+      // (and all of text mode) reasons over combinedText as plain text — by
+      // then combinedText already holds the transcript from batch 0.
+      const materialSection = usingVisionFiles
+        ? `The course material is attached as a PDF file — read all text AND any diagrams, charts, tables, photos, or images it contains.`
+        : `Course material:\n${combinedText}`;
+      return `You are an expert tutor preparing a student for an exam on ${subject}.
 
 ${materialSection}
 
-TASK: Break this material into a step-by-step teaching walkthrough — the way a tutor would cover it in order, one idea at a time. Each step should genuinely TEACH that piece (explain it like you're tutoring one-on-one, with enough detail that a student who never saw the source could learn it from this step alone) — never just restate the heading.
+TASK: Break this material into a step-by-step teaching walkthrough — the way a tutor would cover it in order, one idea at a time, covering the ENTIRE material from start to end (all sections/pages), not just the opening portion. Each step should genuinely TEACH that piece (explain it like you're tutoring one-on-one, with enough detail that a student who never saw the source could learn it from this step alone) — never just restate the heading.
+
+If the material contains ANY calculations, formulas, numeric worked examples, or quantitative problems, you MUST explain them in full: show every step of the working, not just the formula or the final answer — walk through it the way a tutor would at a whiteboard. Never skip over or gloss past numeric/calculation content just because it's harder to explain in prose.
+${coveredHeadings.length ? `\nAlready taught so far: ${coveredHeadings.join('; ')}. Do NOT repeat these — continue with the NEXT distinct points in the material that haven't been covered yet (keep working further into the document).` : ''}
 
 Return ONLY valid JSON (no markdown, no extra text):
-{
-  "walkthroughIntro": "One short paragraph: what this material covers and what the student is about to learn",
+{${includeMeta ? `
+  "walkthroughIntro": "One short paragraph: what this material covers and what the student is about to learn",` : ''}
   "walkthrough": [
-    { "heading": "Step topic", "explanation": "A genuine, tutor-style teaching explanation, 3-6 sentences" }
-  ]${extractionMode === 'vision' ? `,
-  "transcript": "A thorough, detailed prose transcript of everything in the material — all text content plus a full written description of every diagram, chart, table, or image (what it shows, its labels, what it demonstrates) — detailed enough that someone who never saw the PDF could fully understand it from this transcript alone. Used later to generate the exam, so be comprehensive."` : ''}
+    { "heading": "Step topic", "explanation": "A genuine, tutor-style teaching explanation, 3-6 sentences (longer if explaining a calculation — show full working)" }
+  ]${usingVisionFiles ? `,
+  "transcript": "A thorough, detailed prose transcript of EVERYTHING in the material, start to end — all text content plus a full written description of every diagram, chart, table, or image (what it shows, its labels, what it demonstrates), and the COMPLETE working for every calculation or numeric example shown, not just the final figure. Detailed enough that someone who never saw the PDF could fully understand it from this transcript alone. Used later to generate the exam, so be comprehensive and do not cut it short."` : ''}
 }
 
 RULES:
-- walkthrough: 5 to 10 steps, covering the material's actual distinct ideas in a sensible teaching order
+- walkthrough: write up to ${askFor} steps — but only if the material genuinely still has that many distinct, uncovered points left. Return fewer rather than pad with filler or repeat something already taught.
+- If everything in the material has already been covered in "Already taught so far", return an EMPTY walkthrough array — do NOT write a wrap-up/completion step like "all material covered", that is not a real teaching step
 - Keep each step focused — one idea taught well, not several crammed together`;
+    }
 
-    let walkthroughIntro, walkthrough;
+    let walkthrough = [];
+    let walkthroughIntro = '';
+    let coveredHeadings = [];
     try {
-      const parsed = extractionMode === 'vision'
-        ? await gemini.generateJSONFromFiles(walkthroughPrompt, visionFiles, { maxOutputTokens: 4096, temperature: 0.5 })
-        : await gemini.generateJSON(walkthroughPrompt, { maxOutputTokens: 3072, temperature: 0.5 });
+      for (let batch = 0; batch < WALKTHROUGH_MAX_BATCHES && walkthrough.length < WALKTHROUGH_MAX_STEPS; batch++) {
+        const askFor = Math.min(WALKTHROUGH_BATCH_SIZE, WALKTHROUGH_MAX_STEPS - walkthrough.length);
+        const includeMeta = batch === 0;
+        const usingVisionFiles = extractionMode === 'vision' && batch === 0;
+        const prompt = buildWalkthroughPrompt(usingVisionFiles, askFor, coveredHeadings, includeMeta);
 
-      walkthrough = Array.isArray(parsed.walkthrough)
-        ? parsed.walkthrough
-            .map(s => ({ heading: String(s.heading || '').trim(), explanation: String(s.explanation || '').trim() }))
-            .filter(s => s.heading && s.explanation)
-            .slice(0, 12)
-        : [];
-      walkthroughIntro = String(parsed.walkthroughIntro || '').trim();
+        const parsed = usingVisionFiles
+          ? await gemini.generateJSONFromFiles(prompt, visionFiles, { maxOutputTokens: 8192, temperature: 0.5 })
+          : await gemini.generateJSON(prompt, { maxOutputTokens: 8192, temperature: 0.5 });
 
-      if (walkthrough.length === 0)
-        throw new Error('AI returned an empty walkthrough — try again.');
+        if (includeMeta) {
+          walkthroughIntro = String(parsed.walkthroughIntro || '').trim();
+          if (extractionMode === 'vision') {
+            combinedText = String(parsed.transcript || '').trim().slice(0, 100000);
+            if (!combinedText) throw new Error('AI could not read this PDF — try the "Text Only" option or paste the notes instead.');
+          }
+        }
 
-      if (extractionMode === 'vision') {
-        combinedText = String(parsed.transcript || '').trim().slice(0, 20000);
-        if (!combinedText) throw new Error('AI could not read this PDF — try the "Text Only" option or paste the notes instead.');
+        const batchSteps = Array.isArray(parsed.walkthrough)
+          ? parsed.walkthrough
+              .map(s => ({ heading: String(s.heading || '').trim(), explanation: String(s.explanation || '').trim() }))
+              .filter(s => s.heading && s.explanation)
+          : [];
+        if (batchSteps.length === 0) break; // material exhausted
+        walkthrough.push(...batchSteps);
+        coveredHeadings.push(...batchSteps.map(s => s.heading));
+        if (batch > 0 && batchSteps.length < askFor * 0.5) break;
       }
     } catch (aiErr) {
       console.error('[exammode] walkthrough AI error:', aiErr.message);
-      return res.status(500).json({ error: `AI failed to build the walkthrough: ${aiErr.message}` });
+      if (walkthrough.length === 0)
+        return res.status(500).json({ error: `AI failed to build the walkthrough: ${aiErr.message}` });
+      // Keep whatever earlier batches already produced rather than losing it all
     }
+
+    walkthrough = walkthrough.slice(0, WALKTHROUGH_MAX_STEPS);
+    if (walkthrough.length === 0)
+      return res.status(500).json({ error: 'AI returned an empty walkthrough — try again.' });
 
     const session = await ExamModeSession.create({
       userId: req.user.userId,
@@ -419,11 +455,11 @@ router.post('/:id/qa-chat', auth, requireExamModeAccess, async (req, res) => {
 
     const prompt = `You are an expert exam-prep tutor running a Q&A study session with a student on ${session.subject}, grounded in this material:
 
-${session.combinedText.slice(0, 7000)}
+${session.combinedText.slice(0, 40000)}
 ${historyText ? `\nConversation so far:\n${historyText}\n` : ''}
 Student's new message: "${message.trim()}"
 
-Your job: question the student on the material (don't just answer whatever they ask — actively test their understanding), give honest feedback on their answers, and correct misunderstandings. Once they've engaged substantively across several exchanges and seem to genuinely understand the material, start naturally offering to move to the timed exam. Keep replies conversational, under 100 words, no markdown headers.
+Your job: question the student on the material (don't just answer whatever they ask — actively test their understanding), give honest feedback on their answers, and correct misunderstandings. If a calculation is involved, show the full step-by-step working, not just the final answer. Once they've engaged substantively across several exchanges and seem to genuinely understand the material, start naturally offering to move to the timed exam. Keep replies conversational, under 100 words (longer if walking through a calculation), no markdown headers.
 
 Return ONLY valid JSON: { "reply": "...", "readyForExam": true or false }
 readyForExam should only be true once real understanding has been demonstrated across the conversation — never on the very first message.`;

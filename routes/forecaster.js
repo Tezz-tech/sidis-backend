@@ -266,6 +266,8 @@ ${coveredTopics.length ? `\nQuestions already written this session covering: ${c
 
 Mix multiple-choice (objective) and short-answer/essay (theory) questions, in whatever proportion is conventional for a real ${forecast.examSubject} exam.
 
+If the source material contains ANY calculations, formulas, or numeric worked examples, you MUST include questions testing them properly, with the FULL step-by-step working shown in the answer — never skip or simplify away calculation-based content just because it's harder to write a question about than prose facts.
+
 Return ONLY valid JSON (no markdown, no extra text):
 {
   "questions": [

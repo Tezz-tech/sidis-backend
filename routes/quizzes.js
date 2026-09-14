@@ -318,6 +318,7 @@ Return ONLY valid JSON: { "transcript": "..." }`;
 
     const safeContent = extractedText.slice(0, 60_000);
     const isTopicOnly = source === "topic";
+    const calcInstruction = isTopicOnly ? "" : `\nIf the text contains ANY calculations, formulas, or numeric worked examples, you MUST test them properly and show the FULL step-by-step working in the answer/explanation — never skip or simplify away calculation-based content just because it's harder to write a question about than prose facts.\n`;
 
     // Determine if the user provided a meaningful subject or if we need AI to infer one
     const userSubject = subject?.trim();
@@ -342,13 +343,13 @@ Return a JSON OBJECT with this exact structure:
   "questions": [
     {
       "question": "Essay question text?",
-      "modelAnswer": "Comprehensive model answer here.",
+      "modelAnswer": "Comprehensive model answer here — if it involves a calculation, show the full step-by-step working, not just the final figure.",
       "explanation": "Why this answer is correct.",
       "topic": "The specific sub-topic this question tests (e.g. 'Depreciation', not just 'Accounting')"
     }
   ]
 }
-
+${calcInstruction}
 ${isTopicOnly ? "" : `Text:\n${safeContent}`}
       `.trim();
     } else if (questionType === "mixed") {
@@ -365,12 +366,12 @@ Return a JSON OBJECT with this exact structure:
 {
   "subject": "${needsSubjectInference ? 'the specific academic subject (e.g. Accounting, Biology, Psychology — never use General)' : resolvedSubject}",
   "questions": [
-    { "type": "mcq", "question": "Question text?", "options": ["Option A","Option B","Option C","Option D"], "correctAnswer": 0, "explanation": "Brief explanation.", "topic": "specific sub-topic" },
-    { "type": "essay", "question": "Theory question text?", "modelAnswer": "Comprehensive model answer.", "explanation": "Why this answer is correct.", "topic": "specific sub-topic" }
+    { "type": "mcq", "question": "Question text?", "options": ["Option A","Option B","Option C","Option D"], "correctAnswer": 0, "workingScratchpad": "for numeric/calculation MCQs only: work the answer out step by step here AND recompute it once more to confirm — messy work-in-progress is fine in THIS field only, it is never shown to the student", "explanation": "the clean, final, confident explanation — for calculation questions, show the full working leading to the answer; never mention the scratchpad or any earlier mistake", "topic": "specific sub-topic" },
+    { "type": "essay", "question": "Theory question text?", "modelAnswer": "Comprehensive model answer — if it involves a calculation, show the full step-by-step working, not just the final figure.", "explanation": "Why this answer is correct.", "topic": "specific sub-topic" }
   ]
 }
-Note: correctAnswer is the 0-based index of the correct option, and only applies to "mcq" questions.
-
+Note: correctAnswer is the 0-based index of the correct option, and only applies to "mcq" questions. For every numeric/calculation MCQ, verify your answer twice via "workingScratchpad" before settling on the 4 options — make sure exactly one option matches your verified answer exactly.
+${calcInstruction}
 ${isTopicOnly ? "" : `Text:\n${safeContent}`}
       `.trim();
     } else {
@@ -389,13 +390,14 @@ Return a JSON OBJECT with this exact structure:
       "question": "Question text?",
       "options": ["Option A", "Option B", "Option C", "Option D"],
       "correctAnswer": 0,
-      "explanation": "Brief explanation of why this answer is correct.",
+      "workingScratchpad": "for numeric/calculation questions only: work the answer out step by step here AND recompute it once more to confirm — messy work-in-progress is fine in THIS field only, it is never shown to the student",
+      "explanation": "the clean, final, confident explanation of why this answer is correct — for calculation questions, show the full working leading to the answer; never mention the scratchpad or any earlier mistake",
       "topic": "The specific sub-topic this question tests (e.g. 'Depreciation', not just 'Accounting')"
     }
   ]
 }
-Note: correctAnswer is the index (0-3) of the correct option.
-
+Note: correctAnswer is the index (0-3) of the correct option. For every numeric/calculation question, verify your answer twice via "workingScratchpad" before settling on the 4 options — make sure exactly one option matches your verified answer exactly.
+${calcInstruction}
 ${isTopicOnly ? "" : `Text:\n${safeContent}`}
       `.trim();
     }
