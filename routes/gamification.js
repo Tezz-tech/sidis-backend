@@ -819,7 +819,7 @@ Return JSON: { "reply": "...", "suggestedRoute": "/exact-route-from-list-or-null
 
     let reply, suggestedRoute = null, suggestedLabel = null;
     try {
-      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 400, temperature: 0.7 });
+      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 800, temperature: 0.7 });
       reply = parsed.reply;
       const validRoute = APP_PAGES.find(p => p.route === parsed.suggestedRoute);
       if (validRoute) {

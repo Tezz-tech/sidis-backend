@@ -197,6 +197,51 @@ RULES:
   }
 });
 
+// Batched MCQ generation so a catch-up quiz can genuinely run to 50+
+// questions instead of a fixed handful — mirrors exammode.js's
+// generateExamQuiz/buildExamPrompt pattern. Also reused by
+// /:id/generate-more-questions to extend an existing quiz.
+const QUIZ_MAX_QUESTIONS = 50;
+const QUIZ_BATCH_SIZE    = 20;
+const QUIZ_MAX_BATCHES   = 3; // 3 × 20 = 60, comfortably covers the 50 target
+const ADD_QUESTIONS_MAX_PER_CALL = 40;
+
+function buildCatchupQuizPrompt(session, askFor, coveredTopics) {
+  return `You are an expert exam question creator for ${session.subject}.
+Based ONLY on the class material below, generate multiple-choice questions to thoroughly check the student's understanding of what they missed.
+
+Class Material:
+${session.combinedText.slice(0, 12000)}
+${coveredTopics.length ? `\nQuestions already written covering: ${coveredTopics.join('; ')}. Do NOT repeat these — cover different sub-topics or angles still untested.` : ''}
+
+RULES:
+- Each question has exactly 4 options (A, B, C, D), one correct answer, plausible distractors
+- correctAnswer is the 0-based index of the correct option
+- Include a brief explanation for the correct answer
+- Cover the material broadly and in depth — identify every distinct concept or section and test it, don't consolidate everything into a handful of broad questions
+
+Return ONLY valid JSON:
+{
+  "questions": [
+    { "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "...", "topic": "specific sub-topic tested" }
+  ]
+}
+Write up to ${askFor} questions — but only if the material genuinely supports that many distinct, non-repetitive questions. Return fewer rather than pad with filler.`;
+}
+
+function sanitiseCatchupQuestions(raw) {
+  return raw
+    .filter(q => q.question && Array.isArray(q.options) && q.options.length >= 2)
+    .map(q => ({
+      question:      q.question,
+      options:       q.options.slice(0, 4),
+      correctAnswer: typeof q.correctAnswer === 'number' ? Math.min(q.correctAnswer, q.options.length - 1) : 0,
+      modelAnswer:   '',
+      explanation:   q.explanation || '',
+      topic:         q.topic || '',
+    }));
+}
+
 // ── POST /api/catchup/:id/generate-quiz ───────────────────────────────────────
 router.post('/:id/generate-quiz', auth, async (req, res) => {
   try {
@@ -213,44 +258,28 @@ router.post('/:id/generate-quiz', auth, async (req, res) => {
     const quotaError = await checkAndReportQuota(req.user.userId);
     if (quotaError) return res.status(403).json(quotaError);
 
-    const quizPrompt = `You are an expert exam question creator for ${session.subject}.
-Based ONLY on the class material below, generate exactly 8 multiple-choice questions to check the student's understanding of what they missed.
+    let allQuestions  = [];
+    let coveredTopics = [];
+    for (let batch = 0; batch < QUIZ_MAX_BATCHES && allQuestions.length < QUIZ_MAX_QUESTIONS; batch++) {
+      const askFor = Math.min(QUIZ_BATCH_SIZE, QUIZ_MAX_QUESTIONS - allQuestions.length);
+      const quizPrompt = buildCatchupQuizPrompt(session, askFor, coveredTopics);
 
-Class Material:
-${session.combinedText.slice(0, 7000)}
-
-RULES:
-- Each question has exactly 4 options (A, B, C, D), one correct answer, plausible distractors
-- correctAnswer is the 0-based index of the correct option
-- Include a brief explanation for the correct answer
-- Cover the material broadly, not just one section
-
-Return ONLY valid JSON:
-{
-  "questions": [
-    { "question": "...", "options": ["A","B","C","D"], "correctAnswer": 0, "explanation": "...", "topic": "specific sub-topic tested" }
-  ]
-}`;
-
-    let generatedQuestions = [];
-    try {
-      const parsed = await gemini.generateJSON(quizPrompt, { maxOutputTokens: 4096, temperature: 0.5 });
-      if (Array.isArray(parsed.questions)) generatedQuestions = parsed.questions;
-    } catch (aiErr) {
-      console.error('[catchup] quiz AI error:', aiErr.message);
-      return res.status(503).json({ error: 'AI is temporarily unavailable. Please try generating the quiz again in a moment.' });
+      let batchRaw;
+      try {
+        const parsed = await gemini.generateJSON(quizPrompt, { maxOutputTokens: 8192, temperature: 0.5 });
+        batchRaw = Array.isArray(parsed.questions) ? parsed.questions : [];
+      } catch (aiErr) {
+        console.error('[catchup] quiz AI error:', aiErr.message);
+        if (allQuestions.length > 0) break;
+        return res.status(503).json({ error: 'AI is temporarily unavailable. Please try generating the quiz again in a moment.' });
+      }
+      if (batchRaw.length === 0) break;
+      allQuestions.push(...batchRaw);
+      coveredTopics.push(...batchRaw.map(q => q.topic).filter(Boolean));
+      if (batch > 0 && batchRaw.length < askFor * 0.5) break;
     }
 
-    const quizQuestions = generatedQuestions
-      .filter(q => q.question && Array.isArray(q.options) && q.options.length >= 2)
-      .map(q => ({
-        question:      q.question,
-        options:       q.options.slice(0, 4),
-        correctAnswer: typeof q.correctAnswer === 'number' ? Math.min(q.correctAnswer, q.options.length - 1) : 0,
-        modelAnswer:   '',
-        explanation:   q.explanation || '',
-        topic:         q.topic || '',
-      }));
+    const quizQuestions = sanitiseCatchupQuestions(allQuestions).slice(0, QUIZ_MAX_QUESTIONS);
 
     if (quizQuestions.length === 0)
       return res.status(500).json({ error: 'AI returned no usable questions. Please try again.' });
@@ -278,6 +307,112 @@ Return ONLY valid JSON:
   } catch (err) {
     console.error('[catchup] generate-quiz error:', err.message);
     res.status(500).json({ error: `Quiz generation failed: ${err.message || 'unknown'}` });
+  }
+});
+
+// ── POST /api/catchup/:id/generate-more-questions ─────────────────────────────
+// Body: { count }. Appends more AI-generated questions to the session's
+// existing catch-up quiz instead of it staying capped at the first batch —
+// same "keep going indefinitely" pattern as Exam Mode's add-questions route.
+router.post('/:id/generate-more-questions', auth, async (req, res) => {
+  try {
+    if (!gemini.ready)
+      return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
+
+    const session = await CatchUpSession.findOne({ _id: req.params.id, userId: req.user.userId });
+    if (!session)        return res.status(404).json({ error: 'Catch-up session not found.' });
+    if (!session.quizId) return res.status(400).json({ error: 'Generate the quiz first before adding more questions.' });
+
+    const quiz = await Quiz.findOne({ _id: session.quizId, userId: req.user.userId });
+    if (!quiz) return res.status(404).json({ error: 'Catch-up quiz not found.' });
+
+    const requestedCount = parseInt(req.body?.count, 10);
+    if (!Number.isFinite(requestedCount) || requestedCount < 1)
+      return res.status(400).json({ error: 'Specify how many more questions you want (count >= 1).' });
+
+    const targetCount   = Math.min(requestedCount, ADD_QUESTIONS_MAX_PER_CALL);
+    const coveredTopics = (quiz.questions || []).map(q => q.topic).filter(Boolean);
+
+    let newRaw = [];
+    for (let batch = 0; batch < QUIZ_MAX_BATCHES && newRaw.length < targetCount; batch++) {
+      const askFor = Math.min(QUIZ_BATCH_SIZE, targetCount - newRaw.length);
+      const quizPrompt = buildCatchupQuizPrompt(session, askFor, [...coveredTopics, ...newRaw.map(q => q.topic).filter(Boolean)]);
+
+      let batchRaw;
+      try {
+        const parsed = await gemini.generateJSON(quizPrompt, { maxOutputTokens: 8192, temperature: 0.5 });
+        batchRaw = Array.isArray(parsed.questions) ? parsed.questions : [];
+      } catch (aiErr) {
+        console.error('[catchup] generate-more-questions AI error:', aiErr.message);
+        if (newRaw.length > 0) break;
+        return res.status(500).json({ error: `AI failed to generate more questions: ${aiErr.message}` });
+      }
+      if (batchRaw.length === 0) break;
+      newRaw.push(...batchRaw);
+      if (batch > 0 && batchRaw.length < askFor * 0.5) break;
+    }
+
+    const newQuestions = sanitiseCatchupQuestions(newRaw).slice(0, targetCount);
+    if (newQuestions.length === 0)
+      return res.status(500).json({ error: 'AI could not generate further distinct questions from this material — it may already be thoroughly covered.' });
+
+    quiz.questions.push(...newQuestions);
+    quiz.numQuestions = quiz.questions.length;
+    quiz.timeLimit     = Math.max(quiz.timeLimit || 0, Math.ceil(quiz.questions.length * 2));
+    await quiz.save();
+
+    res.json({ success: true, quizId: quiz._id, addedCount: newQuestions.length, numQuestions: quiz.numQuestions });
+  } catch (err) {
+    console.error('[catchup] generate-more-questions error:', err.message);
+    res.status(500).json({ error: `Failed to add more questions: ${err.message || 'unknown'}` });
+  }
+});
+
+// ── POST /api/catchup/:id/chat ─────────────────────────────────────────────────
+// Conversational AI tutor grounded in this session's material — lets the
+// student ask follow-up questions about what they missed, same pattern as
+// Exam Mode's Q&A phase but without any "ready" gate (Catch-Up has no exam
+// phase to unlock — it's just supplementary help alongside the quiz).
+router.post('/:id/chat', auth, async (req, res) => {
+  try {
+    if (!gemini.ready)
+      return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
+
+    const { message, history } = req.body;
+    if (!message || !message.trim()) return res.status(400).json({ error: 'message is required' });
+
+    const session = await CatchUpSession.findOne({ _id: req.params.id, userId: req.user.userId });
+    if (!session) return res.status(404).json({ error: 'Catch-up session not found.' });
+
+    const historyText = Array.isArray(history)
+      ? history.slice(-6).map(h => `${h.role === 'user' ? 'Student' : 'Tutor'}: ${h.content}`).join('\n')
+      : '';
+
+    const prompt = `You are a patient, expert tutor helping a student catch up on ${session.subject} material they missed, grounded in this content:
+
+${session.combinedText.slice(0, 7000)}
+${session.summary?.overview ? `\nSummary already given to the student: ${session.summary.overview}` : ''}
+${historyText ? `\nConversation so far:\n${historyText}\n` : ''}
+Student's new message: "${message.trim()}"
+
+Answer their question clearly and helpfully, drawing only on the material above. If they seem to misunderstand something, gently correct it. Keep replies conversational, under 120 words, no markdown headers.
+
+Return ONLY valid JSON: { "reply": "..." }`;
+
+    let reply;
+    try {
+      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 800, temperature: 0.7 });
+      reply = parsed.reply;
+    } catch (aiErr) {
+      console.error('[catchup] chat AI error:', aiErr.message);
+      return res.status(500).json({ error: 'AI failed to respond. Try again.' });
+    }
+    if (!reply) return res.status(500).json({ error: 'AI returned an empty response.' });
+
+    res.json({ success: true, reply });
+  } catch (err) {
+    console.error('[catchup] chat error:', err.message);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

@@ -92,6 +92,7 @@ const MAX_EXAM_BATCHES   = 3; // 3 × 20 = 60 — kept low since the whole
 function buildExamPrompt(session, askFor, coveredTopics) {
   const material  = session.combinedText.slice(0, 12000);
   const qaContext = session.qaSummary ? session.qaSummary.slice(0, 3000) : '';
+  const pastQuestions = session.pastQuestionsText ? session.pastQuestionsText.slice(0, 12000) : '';
   return `You are a ruthless, expert examiner setting an EXTREMELY HARD, in-depth, COMPREHENSIVE exam paper for ${session.subject} — the kind only a student with genuine mastery of the entire material can pass. Mix multiple-choice (objective) and short-answer/essay (theory) questions, in whatever proportion is conventional for this subject.
 
 Base every question ONLY on the material below. Go deep: test application, edge cases, and understanding of WHY — not simple recall of facts stated verbatim. Avoid questions answerable by pattern-matching a sentence from the text; make the student actually reason.
@@ -100,6 +101,7 @@ Coverage matters as much as difficulty: identify every distinct concept, section
 
 Class material:
 ${material}
+${pastQuestions ? `\nReal past exam questions for this subject were also provided below — study them closely and use them to forecast what's actually likely to be asked: match their real difficulty, phrasing style, question format, and which topics they emphasize most. Do not copy them verbatim, but let them shape the style and focus of the new exam.\n\n${pastQuestions}\n` : ''}
 ${qaContext ? `\nDuring study, the student and their tutor discussed the following — weight the exam toward areas that seemed weak or heavily discussed:\n${qaContext}` : ''}
 ${coveredTopics.length ? `\nQuestions have already been written covering: ${coveredTopics.join('; ')}. Do NOT repeat these — go deeper into the material or test different angles/sub-topics still untested.` : ''}
 
@@ -186,6 +188,68 @@ async function generateExamQuiz(session) {
   });
 }
 
+// Extends an EXISTING exam Quiz document with more questions off the same
+// session material, rather than creating a new quiz — lets a student who
+// finishes every generated question keep going indefinitely instead of the
+// exam ending at a fixed count. No hard ceiling on total question count;
+// each individual call is capped for latency/output-budget reasons only.
+const ADD_QUESTIONS_MAX_PER_CALL = 40;
+
+async function generateMoreExamQuestions(session, quiz, requestedCount) {
+  const targetCount  = Math.max(1, Math.min(requestedCount, ADD_QUESTIONS_MAX_PER_CALL));
+  const coveredTopics = (quiz.questions || []).map(q => q.topic).filter(Boolean);
+
+  let newRaw = [];
+  for (let batch = 0; batch < MAX_EXAM_BATCHES && newRaw.length < targetCount; batch++) {
+    const askFor = Math.min(EXAM_BATCH_SIZE, targetCount - newRaw.length);
+    const examPrompt = buildExamPrompt(session, askFor, [...coveredTopics, ...newRaw.map(q => q.topic).filter(Boolean)]);
+
+    let batchRaw;
+    try {
+      const parsed = await gemini.generateJSON(examPrompt, { maxOutputTokens: 8192, temperature: 0.6 });
+      batchRaw = Array.isArray(parsed.questions) ? parsed.questions : [];
+    } catch (err) {
+      if (newRaw.length > 0) break;
+      throw err;
+    }
+    if (batchRaw.length === 0) break;
+    newRaw.push(...batchRaw);
+    if (batch > 0 && batchRaw.length < askFor * 0.5) break;
+  }
+
+  const newQuestions = newRaw
+    .map(q => {
+      const isEssay = q.type === 'essay' || !Array.isArray(q.options) || q.options.length < 2;
+      return isEssay
+        ? {
+            question:      String(q.question || '').trim(),
+            modelAnswer:   String(q.modelAnswer || '').trim(),
+            explanation:   String(q.explanation || '').trim(),
+            options:       [],
+            correctAnswer: null,
+            topic:         String(q.topic || '').trim(),
+          }
+        : {
+            question:      String(q.question || '').trim(),
+            options:       q.options.slice(0, 4),
+            correctAnswer: Number.isFinite(Number(q.correctAnswer)) ? Number(q.correctAnswer) : 0,
+            explanation:   String(q.explanation || '').trim(),
+            modelAnswer:   '',
+            topic:         String(q.topic || '').trim(),
+          };
+    })
+    .filter(q => q.question && (q.modelAnswer || (q.options.length === 4 && q.correctAnswer !== null)))
+    .slice(0, targetCount);
+
+  if (newQuestions.length === 0) throw new Error('AI could not generate further distinct questions from this material — it may already be thoroughly covered.');
+
+  quiz.questions.push(...newQuestions);
+  quiz.numQuestions = quiz.questions.length;
+  quiz.timeLimit    = Math.max(quiz.timeLimit || 0, Math.ceil(quiz.questions.length * 3));
+  await quiz.save();
+  return newQuestions.length;
+}
+
 // ── POST /api/exammode/create ─────────────────────────────────────────────────
 // Accepts EITHER: multipart (fields: title, subject; files: docs) OR
 // JSON: { title, subject, pastedText }
@@ -233,6 +297,28 @@ router.post('/create', auth, requireExamModeAccess, async (req, res) => {
 
     if (extractionMode === 'text' && !combinedText.trim())
       return res.status(422).json({ error: 'No usable text found. Please check your files or paste the material directly.' });
+
+    // ── Optional past exam papers — same "forecaster" idea as the standalone
+    // Question Forecaster feature, folded directly into Exam Mode so the
+    // final timed exam can be shaped by real past questions without a
+    // separate session. Text-only (paste or PDF-text-extraction) regardless
+    // of which mode the main material used, to keep this additive step simple.
+    let pastQuestionsText  = '';
+    let pastQuestionsFiles = [];
+    if (req.body?.pastQuestionsText?.trim()) {
+      pastQuestionsText  = req.body.pastQuestionsText.trim().slice(0, 30000);
+      pastQuestionsFiles = [{ name: 'Pasted past questions', textLength: pastQuestionsText.length }];
+    } else if (req.files?.pastQuestions) {
+      const rawPQ  = req.files.pastQuestions;
+      const pqList = Array.isArray(rawPQ) ? rawPQ : [rawPQ];
+      try {
+        const { chunks, meta } = await extractTextFromFiles(pqList);
+        pastQuestionsText  = chunks.join('\n\n').slice(0, 30000);
+        pastQuestionsFiles = meta;
+      } catch (extractErr) {
+        console.warn('[exammode] past-questions extraction failed, continuing without them:', extractErr.message);
+      }
+    }
 
     const materialSection = extractionMode === 'vision'
       ? `The course material is attached as a PDF file — read all text AND any diagrams, charts, tables, photos, or images it contains.`
@@ -289,18 +375,21 @@ RULES:
       subject,
       uploadedFiles,
       combinedText,
+      pastQuestionsFiles,
+      pastQuestionsText,
       walkthroughIntro,
       walkthrough,
     });
 
     res.json({
-      success:          true,
-      id:                session._id,
-      title:             session.title,
-      subject:           session.subject,
-      walkthroughIntro:  session.walkthroughIntro,
-      walkthrough:       session.walkthrough,
-      filesProcessed:    uploadedFiles.length,
+      success:              true,
+      id:                    session._id,
+      title:                 session.title,
+      subject:               session.subject,
+      walkthroughIntro:      session.walkthroughIntro,
+      walkthrough:           session.walkthrough,
+      filesProcessed:        uploadedFiles.length,
+      pastQuestionsProcessed: pastQuestionsFiles.length,
     });
   } catch (err) {
     console.error('[exammode] /create unexpected error:', err.message);
@@ -341,7 +430,7 @@ readyForExam should only be true once real understanding has been demonstrated a
 
     let reply, readyForExam = false;
     try {
-      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 350, temperature: 0.7 });
+      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 800, temperature: 0.7 });
       reply = parsed.reply;
       readyForExam = parsed.readyForExam === true;
     } catch (aiErr) {
@@ -432,6 +521,41 @@ router.post('/:id/retake', auth, requireExamModeAccess, async (req, res) => {
   }
 });
 
+// ── POST /api/exammode/:id/add-questions ───────────────────────────────────────
+// Body: { count }. Appends more AI-generated questions to the session's
+// CURRENT quiz (in progress or just finished) instead of ending the exam at
+// a fixed count — lets the student keep going as long as they want.
+router.post('/:id/add-questions', auth, requireExamModeAccess, async (req, res) => {
+  try {
+    if (!gemini.ready)
+      return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
+
+    const session = await ExamModeSession.findOne({ _id: req.params.id, userId: req.user.userId });
+    if (!session)          return res.status(404).json({ error: 'Exam session not found.' });
+    if (!session.quizId)   return res.status(400).json({ error: 'Generate the exam first before adding more questions.' });
+
+    const quiz = await Quiz.findOne({ _id: session.quizId, userId: req.user.userId });
+    if (!quiz) return res.status(404).json({ error: 'Exam quiz not found.' });
+
+    const requestedCount = parseInt(req.body?.count, 10);
+    if (!Number.isFinite(requestedCount) || requestedCount < 1)
+      return res.status(400).json({ error: 'Specify how many more questions you want (count >= 1).' });
+
+    let addedCount;
+    try {
+      addedCount = await generateMoreExamQuestions(session, quiz, requestedCount);
+    } catch (aiErr) {
+      console.error('[exammode] add-questions AI error:', aiErr.message);
+      return res.status(500).json({ error: aiErr.message || 'AI failed to generate more questions.' });
+    }
+
+    res.json({ success: true, quizId: quiz._id, addedCount, numQuestions: quiz.numQuestions });
+  } catch (err) {
+    console.error('[exammode] add-questions error:', err.message);
+    res.status(500).json({ error: `Failed to add more questions: ${err.message || 'unknown'}` });
+  }
+});
+
 // ── POST /api/exammode/:id/report-result ──────────────────────────────────────
 // Called by TakeQuiz.jsx right after it saves the QuizResult, so this session
 // picks up the score, decides pass/fail, and (if failed) gets AI retake advice
@@ -503,7 +627,7 @@ Return ONLY valid JSON: { "advice": "..." }`;
 router.get('/sessions', auth, requireExamModeAccess, async (req, res) => {
   try {
     const sessions = await ExamModeSession.find({ userId: req.user.userId })
-      .select('-combinedText').sort({ createdAt: -1 }).lean();
+      .select('-combinedText -pastQuestionsText').sort({ createdAt: -1 }).lean();
     res.json({ success: true, sessions });
   } catch (err) {
     res.status(500).json({ error: `Failed to fetch exam sessions: ${err.message}` });
@@ -515,7 +639,7 @@ router.get('/:id', auth, requireExamModeAccess, async (req, res) => {
   try {
     const session = await ExamModeSession
       .findOne({ _id: req.params.id, userId: req.user.userId })
-      .select('-combinedText').lean();
+      .select('-combinedText -pastQuestionsText').lean();
     if (!session) return res.status(404).json({ error: 'Exam session not found.' });
     res.json({ success: true, session });
   } catch (err) {

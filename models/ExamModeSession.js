@@ -17,6 +17,17 @@ const ExamModeSessionSchema = new mongoose.Schema({
   }],
   combinedText: { type: String, default: '' },
 
+  // Optional past exam papers / examiner's reports uploaded alongside the
+  // course material — same "forecaster" idea as the standalone Question
+  // Forecaster feature, but folded directly into Exam Mode's own exam
+  // generation so the final timed exam is shaped by real past questions
+  // without requiring a separate Forecaster session.
+  pastQuestionsFiles: [{
+    name:       String,
+    textLength: Number,
+  }],
+  pastQuestionsText: { type: String, default: '' },
+
   walkthroughIntro: { type: String, default: '' },
   walkthrough: [{
     heading:     String,

@@ -708,7 +708,7 @@ router.post("/quizzes/generate", async (req, res) => {
     } else if (file) {
       const allowed = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
       if (!allowed.includes(file.mimetype)) return res.status(400).json({ error: "Only PDF and DOCX allowed" });
-      if (file.size > 12 * 1024 * 1024) return res.status(400).json({ error: "File must be under 12MB" });
+      if (file.size > 4.3 * 1024 * 1024) return res.status(400).json({ error: "File must be under 4.3MB" });
 
       if (file.mimetype === "application/pdf") {
         if (extractionMode === "vision") {
@@ -789,7 +789,7 @@ router.post("/flashcards/generate", async (req, res) => {
       extractedText = content.trim();
     } else if (pdfFile) {
       if (pdfFile.mimetype !== "application/pdf") return res.status(400).json({ error: "Only PDF allowed" });
-      if (pdfFile.size > 5 * 1024 * 1024) return res.status(400).json({ error: "PDF must be under 5MB" });
+      if (pdfFile.size > 4.3 * 1024 * 1024) return res.status(400).json({ error: "PDF must be under 4.3MB" });
 
       if (extractionMode === "vision") {
         useVision = true;

@@ -87,9 +87,9 @@ app.use(async (req, res, next) => {
 app.use(express.json());
 app.use(
   fileUpload({
-    limits: { fileSize: 4 * 1024 * 1024 },  // 4 MB — Vercel hard limit is 4.5 MB
+    limits: { fileSize: 4.3 * 1024 * 1024 },  // 4.3 MB — Vercel's hard request-body cap is 4.5 MB; this leaves headroom for multipart overhead
     abortOnLimit: true,
-    responseOnLimit: JSON.stringify({ error: 'File too large. Each file must be under 4 MB.' }),
+    responseOnLimit: JSON.stringify({ error: 'File too large. Each file must be under 4.3 MB.' }),
     useTempFiles: false,
     safeFileNames: true,
     preserveExtension: true,

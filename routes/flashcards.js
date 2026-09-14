@@ -32,8 +32,8 @@ router.post("/generate-flashcards", auth, async (req, res) => {
       if (pdfFile.mimetype !== "application/pdf") {
         return res.status(400).json({ error: "Only PDF files are allowed" });
       }
-      if (pdfFile.size > 5 * 1024 * 1024) {
-        return res.status(400).json({ error: "PDF must be under 5MB" });
+      if (pdfFile.size > 4.3 * 1024 * 1024) {
+        return res.status(400).json({ error: "PDF must be under 4.3MB" });
       }
 
       if (extractionMode === "vision") {

@@ -53,6 +53,73 @@ function buildFallbackSchedule(subjects, examDate, dailyHours) {
   return sessions;
 }
 
+// ─── POST /api/study-planner/parse-timetable ───────────────────────────────────
+// Upload a photo/scan of a printed exam timetable (field: image) and have AI
+// read it directly — no manual typing of exam name/date/subject list. Runs
+// BEFORE a plan exists, so it only extracts suggested values for the
+// create-plan form; the student still reviews and confirms before /create.
+// A real timetable usually lists a different date per subject, but StudyPlan
+// only tracks one shared examDate for the whole plan (used to size the
+// revision window), so we use the EARLIEST date found — that guarantees the
+// generated schedule finishes revising every subject before the first paper.
+router.post('/parse-timetable', auth, async (req, res) => {
+  try {
+    if (!gemini.ready)
+      return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
+
+    const file = req.files?.image || Object.values(req.files || {})[0];
+    if (!file) return res.status(400).json({ error: 'Send an image file (field: image).' });
+
+    const prompt = `You are reading a photo or scan of a student's exam timetable. Extract the exam schedule from it.
+
+TASK:
+- Identify an overall name for this exam sitting (e.g. "WAEC 2026", "First Semester Exams", "Mock Exams" — infer a reasonable short title from the document if none is printed verbatim)
+- List every distinct subject/paper shown
+- Find every date shown and identify the EARLIEST one
+
+Return ONLY valid JSON (no markdown, no extra text):
+{
+  "examName": "Short overall name for this exam sitting",
+  "earliestDate": "YYYY-MM-DD of the earliest exam date found, or null if no dates are legible",
+  "subjects": ["Subject 1", "Subject 2"]
+}
+
+RULES:
+- subjects: plain subject names only, no dates/times/room numbers attached, no duplicates
+- If the image isn't a timetable or nothing is legible, return { "examName": "", "earliestDate": null, "subjects": [] }`;
+
+    let parsed;
+    try {
+      parsed = await gemini.generateJSONFromFiles(
+        prompt,
+        [{ data: file.data, mimeType: file.mimetype || 'image/jpeg' }],
+        { maxOutputTokens: 2048, temperature: 0.3 }
+      );
+    } catch (aiErr) {
+      console.error('[studyplanner] parse-timetable AI error:', aiErr.message);
+      return res.status(500).json({ error: `AI failed to read this image: ${aiErr.message}` });
+    }
+
+    const subjects = Array.isArray(parsed.subjects)
+      ? [...new Set(parsed.subjects.map(s => String(s || '').trim()).filter(Boolean))].slice(0, 20)
+      : [];
+    const examName = String(parsed.examName || '').trim().slice(0, 100);
+    let examDate = null;
+    if (parsed.earliestDate) {
+      const d = new Date(parsed.earliestDate);
+      if (!isNaN(d.getTime()) && d > new Date()) examDate = formatDate(d);
+    }
+
+    if (!examName && subjects.length === 0)
+      return res.status(422).json({ error: 'Could not read a timetable from this image — try a clearer photo, or enter the details manually.' });
+
+    res.json({ success: true, examName, examDate, subjects });
+  } catch (err) {
+    console.error('[studyplanner] parse-timetable error:', err.message);
+    res.status(500).json({ error: `Failed to read timetable: ${err.message || 'unknown'}` });
+  }
+});
+
 // ─── POST /api/study-planner/create ───────────────────────────────────────────
 router.post('/create', auth, async (req, res) => {
   try {
