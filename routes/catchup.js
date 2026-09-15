@@ -12,6 +12,9 @@ const FlashcardSet   = require('../models/FlashcardSet');
 const { gemini }     = require('../utils/ai');
 const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
 const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
+const mammoth        = require('mammoth');
+
+const isDocx = (file) => (file.mimetype || '').includes('word') || /\.docx?$/i.test(file.name || '');
 
 // ── Shared monthly quota — same check/counter as POST /quizzes/generate-quiz,
 // so a catch-up session and a manually-created AI quiz draw from the same
@@ -40,21 +43,26 @@ async function checkAndReportQuota(userId) {
 }
 
 async function extractTextFromFiles(files) {
-  if (!pdfParseAvailable()) throw new Error('PDF parser is not available on this server. Please paste your class notes as text instead.');
   const chunks = [];
   const meta   = [];
   for (const file of files) {
     try {
-      const text = (await extractPdfText(file.data)).trim();
+      let text;
+      if (isDocx(file)) {
+        text = (await mammoth.extractRawText({ buffer: file.data })).value.trim();
+      } else {
+        if (!pdfParseAvailable()) { console.warn(`[catchup] pdf-parse unavailable, skipping ${file.name}`); continue; }
+        text = (await extractPdfText(file.data)).trim();
+      }
       if (!text) { console.warn(`[catchup] No text in ${file.name} (likely scanned image)`); continue; }
       chunks.push(`=== ${file.name} ===\n${text.slice(0, 40000)}`);
       meta.push({ name: file.name, textLength: text.length });
     } catch (e) {
-      console.warn(`[catchup] pdf-parse failed for ${file.name}: ${e.message}`);
+      console.warn(`[catchup] extraction failed for ${file.name}: ${e.message}`);
     }
   }
   if (chunks.length === 0)
-    throw new Error('Could not extract text from any uploaded file. The PDFs may be scanned images — please paste your class notes as text instead.');
+    throw new Error('Could not extract text from any uploaded file. PDFs may be scanned images — please paste your class notes as text instead.');
   return { chunks, meta };
 }
 
@@ -83,6 +91,7 @@ router.post('/create', auth, async (req, res) => {
     let uploadedFiles = [];
     let combinedText  = '';
     let visionFiles   = null; // [{ data: Buffer, mimeType }] — only set in vision mode
+    let pendingDocxText = ''; // set when vision mode also has .docx uploads — merged into combinedText once batch 0's transcript comes back
 
     // ── Path A: pasted text (JSON body) — always text-only, no images possible ─
     if (req.body?.pastedText?.trim()) {
@@ -94,14 +103,37 @@ router.post('/create', auth, async (req, res) => {
       const rawFiles = req.files.docs || Object.values(req.files)[0];
       const fileList = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
 
-      if (extractionMode === 'vision') {
-        visionFiles   = fileList.map(f => ({ data: f.data, mimeType: f.mimetype || 'application/pdf' }));
-        uploadedFiles = fileList.map(f => ({ name: f.name, textLength: f.data.length }));
-      } else {
+      // Word docs are text-native and Gemini's multimodal API can't read raw
+      // .docx bytes as a "file" the way it reads PDFs/images — so they always
+      // go through mammoth text extraction, even when 'vision' mode is on for
+      // the other uploaded files.
+      const docxFiles   = fileList.filter(isDocx);
+      const visionable  = fileList.filter(f => !isDocx(f));
+      let docxText = '';
+      if (docxFiles.length > 0) {
         try {
-          const { chunks, meta } = await extractTextFromFiles(fileList);
-          combinedText  = chunks.join('\n\n').slice(0, 100000);
-          uploadedFiles = meta;
+          const { chunks } = await extractTextFromFiles(docxFiles);
+          docxText = chunks.join('\n\n');
+        } catch (extractErr) {
+          return res.status(422).json({ error: extractErr.message });
+        }
+      }
+
+      if (extractionMode === 'vision' && visionable.length > 0) {
+        visionFiles     = visionable.map(f => ({ data: f.data, mimeType: f.mimetype || 'application/pdf' }));
+        pendingDocxText = docxText;
+        uploadedFiles = [
+          ...visionable.map(f => ({ name: f.name, textLength: f.data.length })),
+          ...docxFiles.map(f => ({ name: f.name, textLength: f.data.length })),
+        ];
+      } else {
+        // Either plain text mode, or vision mode with nothing vision-capable
+        // to send (all uploads were .docx) — extract everything as text.
+        try {
+          const nonDocx = visionable; // in this branch these are still PDFs, just not sent to vision
+          const { chunks, meta } = nonDocx.length > 0 ? await extractTextFromFiles(nonDocx) : { chunks: [], meta: [] };
+          combinedText  = [...(docxText ? [docxText] : []), ...chunks].join('\n\n').slice(0, 100000);
+          uploadedFiles = [...docxFiles.map(f => ({ name: f.name, textLength: f.data.length })), ...meta];
         } catch (extractErr) {
           return res.status(422).json({ error: extractErr.message });
         }
@@ -165,10 +197,12 @@ RULES:
       for (let batch = 0; batch < SUMMARY_MAX_BATCHES && allConcepts.length < SUMMARY_MAX_CONCEPTS; batch++) {
         const askFor = Math.min(SUMMARY_BATCH_SIZE, SUMMARY_MAX_CONCEPTS - allConcepts.length);
         const includeMeta = batch === 0;
-        // Only the FIRST batch (in vision mode) needs the raw files — once we
-        // have a text transcript back, every later batch just reasons over
-        // that text, same as text-mode uploads always did.
-        const usingVisionFiles = extractionMode === 'vision' && batch === 0;
+        // Only the FIRST batch (when there are actual vision-capable files —
+        // .docx never counts, even if the user had 'vision' toggled on)
+        // needs the raw files; once we have a text transcript back, every
+        // later batch just reasons over that text, same as text-mode uploads
+        // always did.
+        const usingVisionFiles = !!visionFiles && batch === 0;
         const prompt = buildSummaryPrompt(usingVisionFiles, askFor, coveredHeadings, includeMeta);
 
         const parsed = usingVisionFiles
@@ -178,9 +212,10 @@ RULES:
         if (includeMeta) {
           overview = String(parsed.overview || '').trim();
           recap    = String(parsed.recap || '').trim();
-          if (extractionMode === 'vision') {
-            combinedText = String(parsed.transcript || '').trim().slice(0, 100000);
-            if (!combinedText) throw new Error('AI could not read this PDF — try the "Text Only" option or paste the notes instead.');
+          if (visionFiles) {
+            const transcript = String(parsed.transcript || '').trim();
+            if (!transcript) throw new Error('AI could not read this PDF — try the "Text Only" option or paste the notes instead.');
+            combinedText = [transcript, pendingDocxText].filter(Boolean).join('\n\n').slice(0, 100000);
           }
         }
 

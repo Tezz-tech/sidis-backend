@@ -92,7 +92,12 @@ app.use(
     responseOnLimit: JSON.stringify({ error: 'File too large. Each file must be under 4.3 MB.' }),
     useTempFiles: false,
     safeFileNames: true,
-    preserveExtension: true,
+    // `true` here maps to express-fileupload's default 3-character extension
+    // cap, which silently mangles anything longer (.docx, .xlsx, .pptx,
+    // .jpeg -> e.g. "notes.docx" becomes "notesd.ocx") since the file name
+    // only affects display/logging, this was never caught by functional
+    // testing. 10 comfortably covers every real extension this app accepts.
+    preserveExtension: 10,
   })
 );
 
