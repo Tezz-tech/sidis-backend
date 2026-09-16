@@ -168,6 +168,19 @@ ${materialSection}
 
 TASK: Teach this student EVERY distinct point in the material, thoroughly, covering ALL pages/sections — not just the first few or the headline ideas. Go through it as if running a full one-on-one tutoring session covering the WHOLE document from start to end, so they finish genuinely understanding all of it, not just the beginning.
 
+Do NOT reduce this to a glossary of definitions. For each topic the material raises, actively scan for and separately teach EVERY dimension the material actually contains, not just "what it is":
+- Definitions — what it IS
+- Types/categories/classifications
+- Causes, reasons, or factors that lead to or influence it
+- Processes/steps — how it happens or how it's done
+- Characteristics/features/properties
+- Examples or case studies mentioned
+- Advantages/disadvantages, pros/cons
+- Comparisons or differences from related concepts
+- Effects, consequences, or implications
+- Exceptions, special conditions, or rules
+A single topic in the material often has SEVERAL of these dimensions covered in the text — each one is its own separate teaching point, not a footnote to the definition. If the material explains, say, the types AND the causes of something, that is at least two keyConcepts entries, not one. Not every topic has every dimension — only extract the ones actually present in the material, but never stop at just the definition when more is there.
+
 For every point, make it stick: use a vivid analogy, a real-world comparison, or a concrete worked example ("picture it like...", "for example...", "think of it as...") alongside the plain explanation — don't just restate facts, illustrate them.
 
 If the material contains ANY calculations, formulas, numeric worked examples, or quantitative problems, you MUST explain them in full: show every step of the working, not just the formula or the final answer — walk through it the way a tutor would at a whiteboard. Never skip over or gloss past numeric/calculation content just because it's harder to explain in prose.
@@ -177,7 +190,7 @@ Return ONLY valid JSON (no markdown, no extra text):
 {${includeMeta ? `
   "overview": "2-3 sentence plain-language introduction to what this material covers and why it matters",` : ''}
   "keyConcepts": [
-    { "heading": "Concept name", "explanation": "A genuine teaching explanation, 3-6 sentences (longer if explaining a calculation — show full working), including a vivid analogy or worked example — as if tutoring someone who's never seen this before" }
+    { "heading": "Specific point name — e.g. 'Types of X', 'Causes of Y', 'How Z works', not just 'X' — the heading should say WHICH dimension of the topic this entry covers", "explanation": "A genuine teaching explanation, 3-6 sentences (longer if explaining a calculation — show full working, or if listing multiple types/factors — cover each one), including a vivid analogy or worked example — as if tutoring someone who's never seen this before" }
   ]${includeMeta ? `,
   "recap": "A short, memorable summary of the most important takeaways, written as a quick revision recap"${usingVisionFiles ? `,
   "transcript": "A thorough, detailed prose transcript of EVERYTHING in the material, start to end — all text content plus a full written description of every diagram, chart, table, or image (what it shows, its labels, what it demonstrates), and the COMPLETE working for every calculation or numeric example shown, not just the final figure. Detailed enough that someone who never saw the PDF could fully understand it from this transcript alone. This will be used later to generate quiz questions and flashcards, so be comprehensive and do not cut it short."` : ''}` : ''}
@@ -187,6 +200,7 @@ RULES:
 - keyConcepts: write up to ${askFor} — but only if the material genuinely still has that many distinct, uncovered points left. Return fewer rather than pad with filler or repeat something already taught.
 - If everything in the material has already been covered in "Already taught so far", return an EMPTY keyConcepts array — do NOT write a wrap-up/completion entry like "all material covered", that is not a real teaching point
 - Every explanation must include an illustrative analogy or example, not just a restated fact
+- Never collapse "what it is" + "its types" + "its causes" + "how it works" into one entry just to save space — split them into separate keyConcepts the way the material itself separates them
 - Order them the way a tutor would actually teach them, building on what came before`;
     }
 
