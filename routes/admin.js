@@ -14,6 +14,7 @@ const ExamModeSession = require("../models/ExamModeSession");
 const StudyPlan = require("../models/StudyPlan");
 const ExamForecast = require("../models/ExamForecast");
 const { extractPdfText, pdfParseAvailable } = require("../utils/pdfExtract");
+const { resolveUploadedFiles } = require("../utils/blobFetch");
 const mammoth = require("mammoth");
 const adminAuth = require("../middlewares/adminAuth");
 
@@ -695,7 +696,13 @@ router.post("/quizzes/generate", async (req, res) => {
 
   try {
     const { title = "Untitled Quiz", subject = "General", numQuestions = 15, difficulty = "medium", timeLimit = 30, content } = req.body;
-    const file = req.files?.file;
+    let file;
+    try {
+      const files = await resolveUploadedFiles(req, { fileField: "file", urlField: "fileUrls" });
+      file = files[0];
+    } catch (fetchErr) {
+      return res.status(422).json({ error: `Could not read the uploaded file: ${fetchErr.message}` });
+    }
     // 'vision' sends the raw PDF straight to Gemini so diagrams/charts/images
     // are actually read, not just whatever text pdf-parse could pull out.
     // Only meaningful for PDFs — DOCX has no page-image concept.
@@ -708,7 +715,7 @@ router.post("/quizzes/generate", async (req, res) => {
     } else if (file) {
       const allowed = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
       if (!allowed.includes(file.mimetype)) return res.status(400).json({ error: "Only PDF and DOCX allowed" });
-      if (file.size > 4.3 * 1024 * 1024) return res.status(400).json({ error: "File must be under 4.3MB" });
+      if (file.data.length > 10 * 1024 * 1024) return res.status(400).json({ error: "File must be under 10MB" });
 
       if (file.mimetype === "application/pdf") {
         if (extractionMode === "vision") {
@@ -780,7 +787,13 @@ router.post("/flashcards/generate", async (req, res) => {
 
   try {
     const { title = "Untitled Flashcards", subject = "General", content } = req.body;
-    const pdfFile = req.files?.pdfFile;
+    let pdfFile;
+    try {
+      const files = await resolveUploadedFiles(req, { fileField: "pdfFile", urlField: "pdfUrls" });
+      pdfFile = files[0];
+    } catch (fetchErr) {
+      return res.status(422).json({ error: `Could not read the uploaded file: ${fetchErr.message}` });
+    }
     const extractionMode = req.body?.extractionMode === "vision" ? "vision" : "text";
     let extractedText = "";
     let useVision = false;
@@ -789,7 +802,7 @@ router.post("/flashcards/generate", async (req, res) => {
       extractedText = content.trim();
     } else if (pdfFile) {
       if (pdfFile.mimetype !== "application/pdf") return res.status(400).json({ error: "Only PDF allowed" });
-      if (pdfFile.size > 4.3 * 1024 * 1024) return res.status(400).json({ error: "PDF must be under 4.3MB" });
+      if (pdfFile.data.length > 10 * 1024 * 1024) return res.status(400).json({ error: "PDF must be under 10MB" });
 
       if (extractionMode === "vision") {
         useVision = true;

@@ -12,6 +12,7 @@ const FlashcardSet   = require('../models/FlashcardSet');
 const { gemini }     = require('../utils/ai');
 const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
 const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
+const { resolveUploadedFiles } = require('../utils/blobFetch');
 const mammoth        = require('mammoth');
 
 const isDocx = (file) => (file.mimetype || '').includes('word') || /\.docx?$/i.test(file.name || '');
@@ -98,10 +99,16 @@ router.post('/create', auth, async (req, res) => {
       combinedText  = req.body.pastedText.trim().slice(0, 100000);
       uploadedFiles = [{ name: 'Pasted notes', textLength: combinedText.length }];
 
-    // ── Path B: file upload (multipart) ──────────────────────────────────────
-    } else if (req.files && Object.keys(req.files).length > 0) {
-      const rawFiles = req.files.docs || Object.values(req.files)[0];
-      const fileList = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
+    // ── Path B: files — either legacy multipart (small files, under Vercel's
+    // 4.5 MB function body limit) or direct-to-blob URLs (uploaded straight
+    // from the browser to Vercel Blob, so they can be much larger) ──────────
+    } else if ((req.files && Object.keys(req.files).length > 0) || (Array.isArray(req.body?.docUrls) && req.body.docUrls.length > 0)) {
+      let fileList;
+      try {
+        fileList = await resolveUploadedFiles(req, { fileField: 'docs', urlField: 'docUrls' });
+      } catch (fetchErr) {
+        return res.status(422).json({ error: `Could not read an uploaded file: ${fetchErr.message}` });
+      }
 
       // Word docs are text-native and Gemini's multimodal API can't read raw
       // .docx bytes as a "file" the way it reads PDFs/images — so they always

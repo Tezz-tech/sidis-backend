@@ -5,6 +5,7 @@ const auth = require("../middlewares/auth");
 const Quiz = require("../models/Quiz");
 const QuizResult = require("../models/QuizResult");
 const { extractPdfText: extractPdfTextShared, pdfParseAvailable } = require("../utils/pdfExtract");
+const { resolveUploadedFiles } = require("../utils/blobFetch");
 const mammoth = require("mammoth");
 require("dotenv").config();
 
@@ -198,12 +199,20 @@ Return ONLY valid JSON: { "transcript": "..." }`;
     }
     // ---- Source: multi-pdf ----
     else if (source === "multi-pdf") {
-      const files = req.files;
-      if (!files || Object.keys(files).length === 0) {
+      const hasFiles = req.files && Object.keys(req.files).length > 0;
+      const hasUrls  = Array.isArray(req.body?.fileUrls) && req.body.fileUrls.length > 0;
+      if (!hasFiles && !hasUrls) {
         return res.status(400).json({ error: "No files uploaded" });
       }
 
-      const fileList = Array.isArray(files.files) ? files.files : Object.values(files).flat();
+      let fileList;
+      try {
+        fileList = hasUrls
+          ? await resolveUploadedFiles(req, { fileField: "files", urlField: "fileUrls" })
+          : (Array.isArray(req.files.files) ? req.files.files : Object.values(req.files).flat());
+      } catch (fetchErr) {
+        return res.status(422).json({ error: `Could not read an uploaded file: ${fetchErr.message}` });
+      }
       if (fileList.length === 0) return res.status(400).json({ error: "No PDF files found" });
 
       if (extractionMode === "vision") {
@@ -283,8 +292,14 @@ Return ONLY valid JSON: { "transcript": "..." }`;
     else {
       if (content && typeof content === "string" && content.trim().length > 50) {
         extractedText = content.trim();
-      } else if (req.files?.file) {
-        const file = req.files.file;
+      } else if (req.files?.file || (Array.isArray(req.body?.fileUrls) && req.body.fileUrls.length > 0)) {
+        let file;
+        try {
+          const files = await resolveUploadedFiles(req, { fileField: "file", urlField: "fileUrls" });
+          file = files[0];
+        } catch (fetchErr) {
+          return res.status(422).json({ error: `Could not read the uploaded file: ${fetchErr.message}` });
+        }
         if (file.mimetype === "application/pdf") {
           if (extractionMode === "vision") {
             try {

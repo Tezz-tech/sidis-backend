@@ -12,6 +12,7 @@ const QuizResult       = require('../models/QuizResult');
 const { gemini }      = require('../utils/ai');
 const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
 const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
+const { resolveUploadedFiles } = require('../utils/blobFetch');
 
 // Only Exam Mode and plans that already include it (see PLAN_FEATURES.examMode
 // in utils/subscription.js — mirrors studyJourney's exact distribution).
@@ -278,9 +279,13 @@ router.post('/create', auth, requireExamModeAccess, async (req, res) => {
     if (req.body?.pastedText?.trim()) {
       combinedText  = req.body.pastedText.trim().slice(0, 100000);
       uploadedFiles = [{ name: 'Pasted notes', textLength: combinedText.length }];
-    } else if (req.files && Object.keys(req.files).length > 0) {
-      const rawFiles = req.files.docs || Object.values(req.files)[0];
-      const fileList = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
+    } else if ((req.files && Object.keys(req.files).length > 0) || (Array.isArray(req.body?.docUrls) && req.body.docUrls.length > 0)) {
+      let fileList;
+      try {
+        fileList = await resolveUploadedFiles(req, { fileField: 'docs', urlField: 'docUrls' });
+      } catch (fetchErr) {
+        return res.status(422).json({ error: `Could not read an uploaded file: ${fetchErr.message}` });
+      }
 
       if (extractionMode === 'vision') {
         visionFiles   = fileList.map(f => ({ data: f.data, mimeType: f.mimetype || 'application/pdf' }));
@@ -311,10 +316,9 @@ router.post('/create', auth, requireExamModeAccess, async (req, res) => {
     if (req.body?.pastQuestionsText?.trim()) {
       pastQuestionsText  = req.body.pastQuestionsText.trim().slice(0, 30000);
       pastQuestionsFiles = [{ name: 'Pasted past questions', textLength: pastQuestionsText.length }];
-    } else if (req.files?.pastQuestions) {
-      const rawPQ  = req.files.pastQuestions;
-      const pqList = Array.isArray(rawPQ) ? rawPQ : [rawPQ];
+    } else if (req.files?.pastQuestions || (Array.isArray(req.body?.pastQuestionUrls) && req.body.pastQuestionUrls.length > 0)) {
       try {
+        const pqList = await resolveUploadedFiles(req, { fileField: 'pastQuestions', urlField: 'pastQuestionUrls' });
         const { chunks, meta } = await extractTextFromFiles(pqList);
         pastQuestionsText  = chunks.join('\n\n').slice(0, 30000);
         pastQuestionsFiles = meta;

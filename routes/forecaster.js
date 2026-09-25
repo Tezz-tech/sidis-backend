@@ -26,6 +26,7 @@ async function requireForecasterAccess(req, res, next) {
 }
 
 const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
+const { resolveUploadedFiles } = require('../utils/blobFetch');
 
 console.log('[forecaster] pdfParse:', pdfParseAvailable() ? 'loaded' : 'UNAVAILABLE');
 console.log('[forecaster] gemini ready:', gemini.ready);
@@ -103,10 +104,14 @@ router.post('/analyze', auth, requireForecasterAccess, async (req, res) => {
       combinedText  = req.body.pastedText.trim().slice(0, 60000);
       uploadedFiles = [{ name: 'Pasted text', textLength: combinedText.length }];
 
-    // ── Path B: PDF upload (multipart) ───────────────────────────────────────
-    } else if (req.files && Object.keys(req.files).length > 0) {
-      const rawFiles = req.files.pdfs || Object.values(req.files)[0];
-      const fileList = Array.isArray(rawFiles) ? rawFiles : [rawFiles];
+    // ── Path B: PDF upload — legacy multipart, or direct-to-blob URLs ─────────
+    } else if ((req.files && Object.keys(req.files).length > 0) || (Array.isArray(req.body?.pdfUrls) && req.body.pdfUrls.length > 0)) {
+      let fileList;
+      try {
+        fileList = await resolveUploadedFiles(req, { fileField: 'pdfs', urlField: 'pdfUrls' });
+      } catch (fetchErr) {
+        return res.status(422).json({ error: `Could not read an uploaded file: ${fetchErr.message}` });
+      }
 
       if (extractionMode === 'vision') {
         visionFiles   = fileList.map(f => ({ data: f.data, mimeType: f.mimetype || 'application/pdf' }));

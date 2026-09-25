@@ -5,6 +5,7 @@ const auth = require("../middlewares/auth");
 const FlashcardSet = require("../models/FlashcardSet");
 const FlashcardProgress = require("../models/FlashcardProgress");
 const { extractPdfText, pdfParseAvailable } = require("../utils/pdfExtract");
+const { resolveUploadedFiles } = require("../utils/blobFetch");
 require("dotenv").config();
 
 const { gemini, capText } = require("../utils/ai");
@@ -15,10 +16,17 @@ router.post("/generate-flashcards", auth, async (req, res) => {
 
   try {
     const { title, subject, content } = req.body;
-    const pdfFile = req.files?.pdfFile;
     // 'vision' sends the raw PDF straight to Gemini so diagrams/charts/images
     // are actually read, not just whatever text pdf-parse could pull out.
     const extractionMode = req.body?.extractionMode === "vision" ? "vision" : "text";
+
+    let pdfFile;
+    try {
+      const files = await resolveUploadedFiles(req, { fileField: "pdfFile", urlField: "pdfUrls" });
+      pdfFile = files[0];
+    } catch (fetchErr) {
+      return res.status(422).json({ error: `Could not read the uploaded file: ${fetchErr.message}` });
+    }
 
     let extractedText = "";
     let useVision = false;
@@ -32,8 +40,8 @@ router.post("/generate-flashcards", auth, async (req, res) => {
       if (pdfFile.mimetype !== "application/pdf") {
         return res.status(400).json({ error: "Only PDF files are allowed" });
       }
-      if (pdfFile.size > 4.3 * 1024 * 1024) {
-        return res.status(400).json({ error: "PDF must be under 4.3MB" });
+      if (pdfFile.data.length > 10 * 1024 * 1024) {
+        return res.status(400).json({ error: "PDF must be under 10MB" });
       }
 
       if (extractionMode === "vision") {

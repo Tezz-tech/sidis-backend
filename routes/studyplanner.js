@@ -8,6 +8,7 @@ const QuizResult = require('../models/QuizResult');
 
 const { gemini, capText } = require('../utils/ai');
 const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
+const { resolveUploadedFiles } = require('../utils/blobFetch');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -67,7 +68,13 @@ router.post('/parse-timetable', auth, async (req, res) => {
     if (!gemini.ready)
       return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
 
-    const file = req.files?.image || Object.values(req.files || {})[0];
+    let file;
+    try {
+      const files = await resolveUploadedFiles(req, { fileField: 'image', urlField: 'imageUrls' });
+      file = files[0];
+    } catch (fetchErr) {
+      return res.status(422).json({ error: `Could not read the uploaded image: ${fetchErr.message}` });
+    }
     if (!file) return res.status(400).json({ error: 'Send an image file (field: image).' });
 
     const prompt = `You are reading a photo or scan of a student's exam timetable. It may be a real phone photo — angled, slightly blurry, with glare, shadows, or a printed/handwritten mix — do your best to read through those imperfections rather than giving up. Extract the exam schedule from it.
@@ -251,7 +258,7 @@ Return ONLY valid JSON with no markdown:
 // Upload PDF or paste notes for a specific subject. Accepts multipart (field: pdf)
 // OR JSON { subject, notes }.
 router.post('/:planId/subject-material', auth, async (req, res) => {
-  console.log('[studyplanner] subject-material hit, planId:', req.params.planId, 'hasFile:', !!req.files?.pdf, 'bodyKeys:', Object.keys(req.body || {}));
+  console.log('[studyplanner] subject-material hit, planId:', req.params.planId, 'hasFile:', !!req.files?.pdf, 'hasPdfUrls:', !!req.body?.pdfUrls, 'bodyKeys:', Object.keys(req.body || {}));
   try {
     const plan = await StudyPlan.findOne({ _id: req.params.planId, userId: req.user.userId });
     if (!plan) return res.status(404).json({ error: 'Plan not found' });
@@ -267,8 +274,16 @@ router.post('/:planId/subject-material', auth, async (req, res) => {
     let extractedText = '';
     let fileName      = '';
 
-    if (req.files?.pdf) {
-      fileName = req.files.pdf.name || 'document.pdf';
+    let pdfFile;
+    try {
+      const files = await resolveUploadedFiles(req, { fileField: 'pdf', urlField: 'pdfUrls' });
+      pdfFile = files[0];
+    } catch (fetchErr) {
+      return res.status(422).json({ error: `Could not read the uploaded file: ${fetchErr.message}` });
+    }
+
+    if (pdfFile) {
+      fileName = pdfFile.name || 'document.pdf';
 
       if (extractionMode === 'vision') {
         if (!gemini.ready) return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
@@ -280,7 +295,7 @@ Return ONLY valid JSON: { "transcript": "..." }`;
         try {
           const parsed = await gemini.generateJSONFromFiles(
             visionPrompt,
-            [{ data: req.files.pdf.data, mimeType: req.files.pdf.mimetype || 'application/pdf' }],
+            [{ data: pdfFile.data, mimeType: pdfFile.mimetype || 'application/pdf' }],
             { maxOutputTokens: 4096, temperature: 0.4 }
           );
           extractedText = String(parsed.transcript || '').trim();
@@ -292,7 +307,7 @@ Return ONLY valid JSON: { "transcript": "..." }`;
       } else {
         if (!pdfParseAvailable()) return res.status(503).json({ error: 'PDF parser unavailable on this server.' });
         try {
-          extractedText = (await extractPdfText(req.files.pdf.data)).trim();
+          extractedText = (await extractPdfText(pdfFile.data)).trim();
           if (!extractedText)
             return res.status(422).json({ error: 'No text found in PDF. Use a text-based PDF or paste notes instead.' });
         } catch (pdfErr) {
