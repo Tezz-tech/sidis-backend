@@ -27,6 +27,7 @@ async function requireForecasterAccess(req, res, next) {
 
 const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
 const { resolveUploadedFiles } = require('../utils/blobFetch');
+const { DISCIPLINE_MIXED_INSTRUCTION } = require('../utils/disciplinePrompt');
 
 console.log('[forecaster] pdfParse:', pdfParseAvailable() ? 'loaded' : 'UNAVAILABLE');
 console.log('[forecaster] gemini ready:', gemini.ready);
@@ -269,7 +270,7 @@ ${forecast.expectedStandard ? `Expected real-exam standard (from examiner's repo
 ONLY write questions on these exact topics — the student deliberately selected only these, so do NOT write a question on any other topic even if it also appears in the source material below: ${topics.join(', ')}
 ${coveredTopics.length ? `\nQuestions already written this session covering: ${coveredTopics.join('; ')}. Do not repeat these — cover different angles or sub-topics within the SAME allowed topic list above.` : ''}
 
-Mix multiple-choice (objective) and short-answer/essay (theory) questions, in whatever proportion is conventional for a real ${forecast.examSubject} exam.
+${DISCIPLINE_MIXED_INSTRUCTION}
 
 If the source material contains ANY calculations, formulas, or numeric worked examples, you MUST include questions testing them properly, with the FULL step-by-step working shown in the answer — never skip or simplify away calculation-based content just because it's harder to write a question about than prose facts.
 

@@ -13,6 +13,7 @@ const { gemini }     = require('../utils/ai');
 const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
 const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
 const { resolveUploadedFiles } = require('../utils/blobFetch');
+const { DISCIPLINE_MCQ_INSTRUCTION } = require('../utils/disciplinePrompt');
 const mammoth        = require('mammoth');
 
 const isDocx = (file) => (file.mimetype || '').includes('word') || /\.docx?$/i.test(file.name || '');
@@ -301,6 +302,8 @@ function buildCatchupQuizPrompt(session, askFor, coveredTopics) {
   return `You are an expert exam question creator for ${session.subject}.
 Based ONLY on the class material below, generate multiple-choice questions to thoroughly check the student's understanding of what they missed.
 
+${DISCIPLINE_MCQ_INSTRUCTION}
+
 Class Material:
 ${session.combinedText.slice(0, 40000)}
 ${coveredTopics.length ? `\nQuestions already written covering: ${coveredTopics.join('; ')}. Do NOT repeat these — cover different sub-topics or angles still untested.` : ''}
@@ -487,13 +490,15 @@ ${session.summary?.overview ? `\nSummary already given to the student: ${session
 ${historyText ? `\nConversation so far:\n${historyText}\n` : ''}
 Student's new message: "${message.trim()}"
 
-Answer their question clearly and helpfully, drawing only on the material above. If they seem to misunderstand something, gently correct it. If the question involves a calculation or numeric working, show the full step-by-step working, not just the final answer. Keep replies conversational, under 120 words (longer if walking through a calculation), no markdown headers.
+Answer their question clearly and helpfully, drawing only on the material above. If they seem to misunderstand something, gently correct it. If the question involves a calculation or numeric working, show the full step-by-step working, not just the final answer. No markdown headers.
+
+Match your length to the question: a quick/direct question gets a short, direct answer (1-3 sentences) — don't pad it out. When they ask for an explanation, say "explain", "why", "I don't get it", or ask something genuinely conceptual, go as deep and thorough as the topic needs, with full working for any calculation — don't cut a real explanation short just to stay brief.
 
 Return ONLY valid JSON: { "reply": "..." }`;
 
     let reply;
     try {
-      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 800, temperature: 0.7 });
+      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 1500, temperature: 0.7 });
       reply = parsed.reply;
     } catch (aiErr) {
       console.error('[catchup] chat AI error:', aiErr.message);

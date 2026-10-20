@@ -15,6 +15,7 @@ try { ({ awardXP } = require("../utils/gamificationUtils")); } catch (_) {}
 
 const { gemini, capText } = require("../utils/ai");
 const { resolveSpecificSubject } = require("../utils/subjectResolver");
+const { DISCIPLINE_MIXED_INSTRUCTION, DISCIPLINE_MCQ_INSTRUCTION } = require("../utils/disciplinePrompt");
 const { processQuizResult } = require("../utils/adaptiveEngine");
 const { computeAndSyncUserStats } = require("../utils/userStats");
 
@@ -352,6 +353,8 @@ Difficulty: ${difficulty}
 Count: ${numQuestions} questions
 ${isTopicOnly ? `Topic: ${topic}` : `Based strictly on the provided text.`}
 
+${DISCIPLINE_MIXED_INSTRUCTION}
+
 Return a JSON OBJECT with this exact structure:
 {
   "subject": "${needsSubjectInference ? 'the specific academic subject (e.g. Accounting, Biology, Psychology — never use General)' : resolvedSubject}",
@@ -375,7 +378,8 @@ Difficulty: ${difficulty}
 Total questions: ${numQuestions}
 ${isTopicOnly ? `Topic: ${topic}` : `Based strictly on the provided text.`}
 
-Decide the objective-to-theory ratio yourself based on how exams in this subject are conventionally structured (e.g. mostly objective with a handful of theory questions for sciences/accounting/business-style subjects; more essay-weighted for literature/humanities/law-style subjects). Include at least one of each type when the total allows it.
+${DISCIPLINE_MIXED_INSTRUCTION}
+Include at least one of each type (mcq and essay) when the total allows it.
 
 Return a JSON OBJECT with this exact structure:
 {
@@ -396,6 +400,8 @@ ${needsSubjectInference ? `The content covers an academic topic — identify it.
 Difficulty: ${difficulty}
 Count: ${numQuestions} questions
 ${isTopicOnly ? `Topic: ${topic}` : `Based strictly on the provided text.`}
+
+${DISCIPLINE_MCQ_INSTRUCTION}
 
 Return a JSON OBJECT with this exact structure:
 {

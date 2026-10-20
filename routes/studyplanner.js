@@ -5,10 +5,12 @@ const auth      = require('../middlewares/auth');
 const StudyPlan = require('../models/StudyPlan');
 const Quiz      = require('../models/Quiz');
 const QuizResult = require('../models/QuizResult');
+const FlashcardSet = require('../models/FlashcardSet');
 
 const { gemini, capText } = require('../utils/ai');
 const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
 const { resolveUploadedFiles } = require('../utils/blobFetch');
+const { DISCIPLINE_MCQ_INSTRUCTION } = require('../utils/disciplinePrompt');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -20,6 +22,29 @@ function addDays(date, n) {
 
 function formatDate(date) {
   return new Date(date).toISOString().split('T')[0];
+}
+
+// Exam day itself is never part of the regular study schedule (neither the
+// AI prompt nor the fallback generator produce a session dated on the exam
+// day — both stop the day before) — appended once, uniformly, after either
+// path runs, so it's never dependent on the AI actually including it. One
+// light final-review session per subject: a quick flashcard recap, not new
+// content or a long quiz, the morning of.
+function appendExamDaySessions(sessions, subjects, examDate) {
+  const exam = new Date(examDate);
+  exam.setHours(0, 0, 0, 0);
+  subjects.forEach(subject => {
+    sessions.push({
+      date: exam,
+      subject,
+      durationMinutes: 20,
+      sessionType: 'review',
+      priority: 'high',
+      notes: 'Exam day — quick flashcard recap only, no new material.',
+      isExamDay: true,
+    });
+  });
+  return sessions;
 }
 
 // Fallback deterministic schedule when AI is unavailable
@@ -242,6 +267,8 @@ Return ONLY valid JSON with no markdown:
       sessions = buildFallbackSchedule(subjects, plan.examDate, plan.dailyStudyHours);
     }
 
+    sessions = appendExamDaySessions(sessions, subjects, plan.examDate);
+
     plan.schedule  = sessions;
     plan.generated = true;
     plan.updatedAt = new Date();
@@ -373,6 +400,8 @@ router.post('/:planId/session/:sessionId/start', auth, async (req, res) => {
       quizPrompt = `You are an expert exam question creator for ${subject}.
 Based ONLY on the study material below, generate exactly ${mcqCount} multiple-choice questions.
 
+${DISCIPLINE_MCQ_INSTRUCTION}
+
 Study Material:
 ${subjectMaterial.notes.slice(0, 7000)}
 
@@ -393,6 +422,8 @@ Return ONLY valid JSON:
     } else {
       quizPrompt = `You are an expert exam question creator for ${subject}.
 Generate exactly ${mcqCount} multiple-choice questions for a study session.
+
+${DISCIPLINE_MCQ_INSTRUCTION}
 
 Context:
 - Subject: ${subject}
@@ -463,6 +494,84 @@ Return ONLY valid JSON:
   } catch (err) {
     console.error('Start session error:', err);
     res.status(500).json({ error: 'Failed to start session' });
+  }
+});
+
+// ─── POST /api/study-planner/:planId/session/:sessionId/start-flashcards ───────
+// Same pattern as /start (quiz), but produces a FlashcardSet instead —
+// every session can offer both, and the exam-day session specifically is
+// meant to lean on this one (a quick recap, not a full practice quiz).
+router.post('/:planId/session/:sessionId/start-flashcards', auth, async (req, res) => {
+  try {
+    const plan = await StudyPlan.findOne({ _id: req.params.planId, userId: req.user.userId });
+    if (!plan) return res.status(404).json({ error: 'Plan not found' });
+
+    const session = plan.schedule.id(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    if (session.flashcardSetId) {
+      return res.json({ success: true, flashcardSetId: session.flashcardSetId, flashcardSetTitle: session.flashcardSetTitle });
+    }
+
+    if (!gemini.ready)
+      return res.status(503).json({ error: 'AI is temporarily unavailable. Please try again later.' });
+
+    const subject  = session.subject;
+    const cardCount = session.isExamDay ? 15 : 12;
+
+    const subjectMaterial = (plan.subjectMaterials || []).find(
+      m => m.subject === subject && m.hasContent && m.notes?.trim()
+    );
+
+    const flashcardPrompt = `You are an expert tutor creating flashcards for ${subject}.
+${session.isExamDay
+  ? `This is a quick EXAM-DAY recap — the student sits "${plan.examName}" today. Focus only on the most important, highest-yield points to jog memory right before the exam, not new or obscure material.`
+  : `This is a regular study-session flashcard set.`}
+${subjectMaterial ? `Based on the study material below:\n${subjectMaterial.notes.slice(0, 7000)}` : `Cover core, commonly-examined knowledge for ${subject}.`}
+
+Generate exactly ${cardCount} flashcards.
+Return ONLY valid JSON:
+{
+  "cards": [
+    { "question": "Term or prompt", "answer": "Concise, correct answer", "topic": "specific sub-topic, e.g. 'Depreciation' not just the subject name" }
+  ]
+}`;
+
+    let generatedCards = [];
+    try {
+      const parsed = await gemini.generateJSON(flashcardPrompt);
+      if (Array.isArray(parsed.cards)) generatedCards = parsed.cards;
+    } catch (aiErr) {
+      console.error('AI flashcard error:', aiErr.message);
+      return res.status(503).json({ error: 'AI is temporarily unavailable. Please try again later.' });
+    }
+
+    const cards = generatedCards
+      .filter(c => c.question?.trim() && c.answer?.trim())
+      .map(c => ({ question: c.question.trim(), answer: c.answer.trim(), topic: c.topic?.trim() || '', masteryLevel: 0 }));
+
+    if (cards.length === 0)
+      return res.status(500).json({ error: 'AI returned no flashcards. Please try again.' });
+
+    const title = `${subject} — ${plan.examName} (${session.isExamDay ? 'Exam Day Recap' : 'Session Review'})`;
+    const flashcardSet = await FlashcardSet.create({
+      userId: req.user.userId,
+      title,
+      subject,
+      cards,
+      isPublic: false,
+      isAdminCreated: false,
+    });
+
+    session.flashcardSetId    = flashcardSet._id;
+    session.flashcardSetTitle = flashcardSet.title;
+    plan.updatedAt = new Date();
+    await plan.save();
+
+    res.json({ success: true, flashcardSetId: flashcardSet._id, flashcardSetTitle: flashcardSet.title });
+  } catch (err) {
+    console.error('Start session flashcards error:', err);
+    res.status(500).json({ error: 'Failed to generate flashcards' });
   }
 });
 
@@ -591,6 +700,9 @@ router.get('/next-session', auth, async (req, res) => {
         isPast: best.isPast,
         quizId: best.session.quizId,
         quizTitle: best.session.quizTitle,
+        flashcardSetId: best.session.flashcardSetId,
+        flashcardSetTitle: best.session.flashcardSetTitle,
+        isExamDay: best.session.isExamDay || false,
         autoGenerated: best.session.autoGenerated || false,
       },
     });

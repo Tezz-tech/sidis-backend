@@ -13,6 +13,7 @@ const { gemini }      = require('../utils/ai');
 const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
 const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
 const { resolveUploadedFiles } = require('../utils/blobFetch');
+const { DISCIPLINE_MIXED_INSTRUCTION } = require('../utils/disciplinePrompt');
 
 // Only Exam Mode and plans that already include it (see PLAN_FEATURES.examMode
 // in utils/subscription.js — mirrors studyJourney's exact distribution).
@@ -94,7 +95,9 @@ function buildExamPrompt(session, askFor, coveredTopics) {
   const material  = session.combinedText.slice(0, 40000);
   const qaContext = session.qaSummary ? session.qaSummary.slice(0, 3000) : '';
   const pastQuestions = session.pastQuestionsText ? session.pastQuestionsText.slice(0, 20000) : '';
-  return `You are a ruthless, expert examiner setting an EXTREMELY HARD, in-depth, COMPREHENSIVE exam paper for ${session.subject} — the kind only a student with genuine mastery of the entire material can pass. Mix multiple-choice (objective) and short-answer/essay (theory) questions, in whatever proportion is conventional for this subject.
+  return `You are a ruthless, expert examiner setting an EXTREMELY HARD, in-depth, COMPREHENSIVE exam paper for ${session.subject} — the kind only a student with genuine mastery of the entire material can pass.
+
+${DISCIPLINE_MIXED_INSTRUCTION}
 
 Base every question ONLY on the material below. Go deep: test application, edge cases, and understanding of WHY — not simple recall of facts stated verbatim. Avoid questions answerable by pattern-matching a sentence from the text; make the student actually reason.
 
@@ -463,14 +466,16 @@ ${session.combinedText.slice(0, 40000)}
 ${historyText ? `\nConversation so far:\n${historyText}\n` : ''}
 Student's new message: "${message.trim()}"
 
-Your job: question the student on the material (don't just answer whatever they ask — actively test their understanding), give honest feedback on their answers, and correct misunderstandings. If a calculation is involved, show the full step-by-step working, not just the final answer. Once they've engaged substantively across several exchanges and seem to genuinely understand the material, start naturally offering to move to the timed exam. Keep replies conversational, under 100 words (longer if walking through a calculation), no markdown headers.
+Your job: question the student on the material (don't just answer whatever they ask — actively test their understanding), give honest feedback on their answers, and correct misunderstandings. If a calculation is involved, show the full step-by-step working, not just the final answer. Once they've engaged substantively across several exchanges and seem to genuinely understand the material, start naturally offering to move to the timed exam. No markdown headers.
+
+Match your length to the moment: most exchanges here should be short and conversational (1-3 sentences) — a quick question, quick feedback, keep it moving. When they ask you to explain something, say "why", "I don't get it", or ask a genuinely conceptual question, go as deep and thorough as it needs, with full working for any calculation — don't cut a real explanation short just to stay brief.
 
 Return ONLY valid JSON: { "reply": "...", "readyForExam": true or false }
 readyForExam should only be true once real understanding has been demonstrated across the conversation — never on the very first message.`;
 
     let reply, readyForExam = false;
     try {
-      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 800, temperature: 0.7 });
+      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 1500, temperature: 0.7 });
       reply = parsed.reply;
       readyForExam = parsed.readyForExam === true;
     } catch (aiErr) {
