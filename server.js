@@ -38,6 +38,8 @@ let exammodeRoutes = null;
 try { exammodeRoutes = require('./routes/exammode'); console.log('exammode routes: loaded'); } catch (e) { console.error('exammode load error:', e.message, e.stack); }
 let blobRoutes = null;
 try { blobRoutes = require('./routes/blob'); console.log('blob routes: loaded'); } catch (e) { console.error('blob load error:', e.message, e.stack); }
+let pushRoutes = null;
+try { pushRoutes = require('./routes/push'); console.log('push routes: loaded'); } catch (e) { console.error('push load error:', e.message, e.stack); }
 const fileUpload = require('express-fileupload');
 const cors = require('cors');
 
@@ -175,6 +177,7 @@ if (groupRoutes)         app.use('/api/group',         groupRoutes);
 if (catchupRoutes)       app.use('/api/catchup',       catchupRoutes);
 if (exammodeRoutes)      app.use('/api/exammode',      exammodeRoutes);
 if (blobRoutes)          app.use('/api/blob',          blobRoutes);
+if (pushRoutes)          app.use('/api/push',          pushRoutes);
 
 // -------------------------------------------------
 // 5. JSON 404 for any unmatched route (so CORS headers are always present)
