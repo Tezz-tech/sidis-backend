@@ -5,8 +5,10 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const User = require('../models/User');
 const Subscription = require('../models/Subscription');
+const Referral = require('../models/Referral');
 const auth = require('../middlewares/auth');
 const sendEmail = require('../utils/email');
+const { generateUniqueReferralCode } = require('../utils/referral');
 
 function hashResetToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
@@ -15,43 +17,64 @@ function hashResetToken(token) {
 // Signup route
 router.post('/signup', async (req, res) => {
   try {
-    const { fullName, email, password, phoneNumber } = req.body;
-    
+    const { fullName, email, password, phoneNumber, referralCode } = req.body;
+
     // Validate required fields
     if (!fullName || !email || !password || !phoneNumber) {
       return res.status(400).json({ error: 'All fields are required' });
     }
-    
+
     // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({ error: 'Email already exists' });
     }
-    
+
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
-    
+
+    // A bad/unknown referral code never blocks signup — it's just ignored.
+    let referrer = null;
+    if (referralCode && referralCode.trim()) {
+      referrer = await User.findOne({ referralCode: referralCode.trim().toUpperCase() });
+    }
+
+    const ownCode = await generateUniqueReferralCode(fullName);
+
     // Create new user with phone number
-    const user = new User({ 
-      fullName, 
-      email, 
+    const user = new User({
+      fullName,
+      email,
       password: hashedPassword,
-      phoneNumber 
+      phoneNumber,
+      referralCode: ownCode,
+      referredBy: referrer ? referrer._id : null,
     });
-    
+
     await user.save();
-    
+
+    // Referral only ever "counts" once the referred user actually pays —
+    // this record starts 'pending' and is flipped to 'converted' from
+    // routes/payments.js when that first payment verifies.
+    if (referrer) {
+      await Referral.create({
+        referrerId: referrer._id,
+        referredId: user._id,
+        code: referrer.referralCode,
+      }).catch((e) => console.error('[referrals] signup record error:', e.message));
+    }
+
     // Generate token
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    
-    res.status(201).json({ 
-      token, 
-      user: { 
-        id: user._id, 
-        fullName, 
+
+    res.status(201).json({
+      token,
+      user: {
+        id: user._id,
+        fullName,
         email,
-        phoneNumber 
-      } 
+        phoneNumber
+      }
     });
   } catch (error) {
     console.error('Signup error:', error);

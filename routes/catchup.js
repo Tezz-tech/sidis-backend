@@ -23,7 +23,7 @@ const isDocx = (file) => (file.mimetype || '').includes('word') || /\.docx?$/i.t
 // pool. Free/exam_mode users get 5/month; every paid plan is unlimited.
 async function checkAndReportQuota(userId) {
   const plan     = await getUserPlan(userId);
-  const features = getPlanFeatures(plan);
+  const features = await getPlanFeatures(plan);
   if (features.unlimitedQuizzes) return null;
 
   const monthStart = new Date();

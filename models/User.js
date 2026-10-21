@@ -67,6 +67,15 @@ const userSchema = new mongoose.Schema({
   // ── Ads Remover ───────────────────────────────────────
   adsRemovedUntil: { type: Date, default: null },
 
+  // ── Referrals ──────────────────────────────────────────
+  // This user's own shareable code (generated at signup, or lazily on
+  // first GET /api/referrals/mine for accounts that predate this field).
+  referralCode: { type: String, default: null, unique: true, sparse: true },
+  // Who referred this user in, if anyone — set once at signup, never
+  // changed afterwards. The actual pending/converted tracking lives in its
+  // own Referral document (see models/Referral.js), not here.
+  referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+
   // ── SID's IQ subject interests ─────────────────────────
   // The subjects the student said they want to focus on/be recommended for
   // Sid IQ. Previously lived ONLY in browser localStorage, which meant the

@@ -96,7 +96,7 @@ router.post("/generate-quiz", auth, async (req, res) => {
   try {
     const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
     const plan     = await getUserPlan(req.user.userId);
-    const features = getPlanFeatures(plan);
+    const features = await getPlanFeatures(plan);
 
     if (!features.unlimitedQuizzes) {
       const monthStart = new Date();

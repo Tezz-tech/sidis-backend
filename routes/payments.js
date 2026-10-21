@@ -7,22 +7,28 @@ const auth         = require('../middlewares/auth');
 const Subscription = require('../models/Subscription');
 const User         = require('../models/User');
 const Quiz         = require('../models/Quiz');
-const { getPlanFeatures, PLAN_NAMES, getEffectiveSubscription } = require('../utils/subscription');
+const Referral     = require('../models/Referral');
+const { getPlanFeatures, getPlanName, getEffectiveSubscription, getPackageByKey, getAllActivePackages } = require('../utils/subscription');
 const MAX_GROUP_MEMBERS = 2;
 
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
 const PAYSTACK_BASE   = 'https://api.paystack.co';
 
-// ── Plan catalogue ────────────────────────────────────────────────────────────
-const PLANS = {
-  exam_mode:          { name: 'Exam Mode',          amount: 725000,   durationDays: 3650, isGroup: false },
-  weekly_individual:  { name: 'Weekly Individual',  amount: 575000,   durationDays: 7,    isGroup: false },
-  weekly_group:       { name: 'Weekly Group',        amount: 295000,   durationDays: 7,    isGroup: true  },
-  monthly_individual: { name: 'Monthly Individual', amount: 1525000,  durationDays: 30,   isGroup: false },
-  monthly_group:      { name: 'Monthly Group',       amount: 358400,   durationDays: 30,   isGroup: true  },
-  yearly_individual:  { name: 'Yearly Individual',  amount: 5025000,  durationDays: 365,  isGroup: false },
-  yearly_group:       { name: 'Yearly Group',        amount: 858300,   durationDays: 365,  isGroup: true  },
-};
+// Referral only ever counts once — findOneAndUpdate's status:'pending'
+// filter means a second activation (renewal) for the same user simply
+// won't match anything, so this is safe to call on every activation path.
+async function convertReferralIfPending(userId, subscriptionId) {
+  try {
+    const ref = await Referral.findOneAndUpdate(
+      { referredId: userId, status: 'pending' },
+      { status: 'converted', convertedAt: new Date(), subscriptionId },
+      { new: true }
+    );
+    if (ref) console.log(`[referrals] converted referral ${ref._id} for user ${userId}`);
+  } catch (err) {
+    console.error('[referrals] conversion error:', err.message);
+  }
+}
 
 function paystackHeaders() {
   return { Authorization: `Bearer ${(PAYSTACK_SECRET || '').trim()}`, 'Content-Type': 'application/json' };
@@ -75,7 +81,12 @@ async function verifyAndActivate(reference, userId) {
     throw err;
   }
 
-  const planConfig = PLANS[sub.plan];
+  const planConfig = await getPackageByKey(sub.plan);
+  if (!planConfig) {
+    const err = new Error('This plan is no longer available.');
+    err.httpStatus = 410;
+    throw err;
+  }
   const now        = new Date();
   sub.status                = 'active';
   sub.paystackTransactionId = String(tx.id);
@@ -85,20 +96,32 @@ async function verifyAndActivate(reference, userId) {
   await sub.save();
 
   console.log(`[payments] activated ${sub.planName} for user ${userId} until ${sub.expiresAt.toISOString()}`);
+  await convertReferralIfPending(userId, sub._id);
   return { subscription: sub, alreadyActive: false };
 }
 
 // ── GET /api/payments/plans (public) ─────────────────────────────────────────
-router.get('/plans', (req, res) => {
-  const out = Object.entries(PLANS).map(([key, p]) => ({
-    key,
-    name:    p.name,
-    amount:  p.amount,
-    amountNGN: p.amount / 100,
-    durationDays: p.durationDays,
-    isGroup: p.isGroup,
-  }));
-  res.json({ success: true, plans: out });
+// Admin-managed catalogue — see /api/admin/packages for create/edit/delete.
+router.get('/plans', async (req, res) => {
+  try {
+    const packages = await getAllActivePackages();
+    const out = packages.map(p => ({
+      key:      p.key,
+      name:     p.name,
+      amount:   p.amount,
+      amountNGN: p.amount / 100,
+      durationDays: p.durationDays,
+      isGroup:  p.isGroup,
+      popular:  p.popular,
+      badge:    p.badge,
+      color:    p.color,
+      displayFeatures: p.displayFeatures,
+      access:   p.access,
+    }));
+    res.json({ success: true, plans: out });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── GET /api/payments/my-subscription ────────────────────────────────────────
@@ -124,7 +147,7 @@ router.get('/my-features', auth, async (req, res) => {
   try {
     const { subscription, viaGroup } = await getEffectiveSubscription(req.user.userId);
     const plan     = subscription ? subscription.plan : 'free';
-    const features = getPlanFeatures(plan);
+    const features = await getPlanFeatures(plan);
 
     // Count AI quizzes generated this month (free users have a 5/month cap)
     const monthStart = new Date();
@@ -154,7 +177,7 @@ router.get('/my-features', auth, async (req, res) => {
     res.json({
       success:          true,
       plan,
-      planName:         PLAN_NAMES[plan] || 'Free',
+      planName:         await getPlanName(plan),
       features,
       usage: {
         aiQuizzesThisMonth,
@@ -179,13 +202,13 @@ router.get('/my-features', auth, async (req, res) => {
 router.post('/prepare', auth, async (req, res) => {
   try {
     const { plan } = req.body;
-    if (!plan || !PLANS[plan])
+    const planConfig = plan && await getPackageByKey(plan);
+    if (!planConfig || !planConfig.active)
       return res.status(400).json({ error: `Unknown plan: ${plan}` });
 
     const user = await User.findById(req.user.userId).lean();
     if (!user) return res.status(404).json({ error: 'User not found.' });
 
-    const planConfig = PLANS[plan];
     const reference  = `SIDIS_${plan}_${req.user.userId}_${Date.now()}`;
 
     await Subscription.create({
@@ -239,13 +262,13 @@ router.post('/initialize', auth, async (req, res) => {
       return res.status(503).json({ error: 'Payment service not configured — PAYSTACK_SECRET_KEY missing.' });
 
     const { plan, callbackUrl } = req.body;
-    if (!plan || !PLANS[plan])
-      return res.status(400).json({ error: `Unknown plan: ${plan}. Valid: ${Object.keys(PLANS).join(', ')}` });
+    const planConfig = plan && await getPackageByKey(plan);
+    if (!planConfig || !planConfig.active)
+      return res.status(400).json({ error: `Unknown plan: ${plan}` });
 
     const user = await User.findById(req.user.userId).lean();
     if (!user) return res.status(404).json({ error: 'User not found.' });
 
-    const planConfig = PLANS[plan];
     const reference  = `SIDIS_${plan}_${req.user.userId}_${Date.now()}`;
 
     // Call Paystack initialize
@@ -333,14 +356,17 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       if (ref) {
         const sub = await Subscription.findOne({ paystackReference: ref });
         if (sub && sub.status !== 'active') {
-          const planConfig = PLANS[sub.plan];
-          const now        = new Date();
-          sub.status       = 'active';
-          sub.startDate    = now;
-          sub.expiresAt    = new Date(now.getTime() + planConfig.durationDays * 86400 * 1000);
-          sub.paystackTransactionId = String(event.data.id);
-          await sub.save();
-          console.log(`[payments] webhook activated ${sub.planName} for user ${sub.userId}`);
+          const planConfig = await getPackageByKey(sub.plan);
+          if (planConfig) {
+            const now        = new Date();
+            sub.status       = 'active';
+            sub.startDate    = now;
+            sub.expiresAt    = new Date(now.getTime() + planConfig.durationDays * 86400 * 1000);
+            sub.paystackTransactionId = String(event.data.id);
+            await sub.save();
+            console.log(`[payments] webhook activated ${sub.planName} for user ${sub.userId}`);
+            await convertReferralIfPending(sub.userId, sub._id);
+          }
         }
       }
     }

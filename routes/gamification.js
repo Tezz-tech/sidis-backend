@@ -8,7 +8,11 @@ const Quiz    = require('../models/Quiz');
 const TopicMastery = require('../models/TopicMastery');
 const StudyPlan = require('../models/StudyPlan');
 const ActivityLog = require('../models/ActivityLog');
-const { getUserPlan, getPlanFeatures, PLAN_NAMES, FEATURE_REQUIRED_PLAN } = require('../utils/subscription');
+const { getUserPlan, getPlanFeatures, getPlanName, getFeatureRequiredPlanMap } = require('../utils/subscription');
+
+// Feature keys worth pitching mid-conversation when a student hits one —
+// matches the upgrade-prompt flags in Package.access (see models/Package.js).
+const UPSELL_FEATURE_KEYS = ['moreTools', 'studyJourney', 'examMode', 'studyBuddy', 'forecaster', 'sidIQ'];
 const {
   BADGE_DEFS, LEVEL_THRESHOLDS, POWERUP_COSTS,
   getLevelInfo, checkNewBadges, awardXP,
@@ -768,9 +772,9 @@ router.post('/tutor-chat', auth, async (req, res) => {
     // Only checked here; the counter is only incremented once a reply is
     // actually generated below, so a failed/unavailable AI call never burns
     // part of the student's daily quota for nothing.
-    const { tutorChatDailyLimit } = getPlanFeatures(planKey);
+    const { tutorChatDailyLimit } = await getPlanFeatures(planKey);
     let usedToday = 0;
-    if (tutorChatDailyLimit !== Infinity) {
+    if (tutorChatDailyLimit !== -1) {
       const todayStart = new Date();
       todayStart.setHours(0, 0, 0, 0);
       const lastCountDate = user.tutorChatCountDate ? new Date(user.tutorChatCountDate) : null;
@@ -799,16 +803,17 @@ router.post('/tutor-chat', auth, async (req, res) => {
     // What this student's CURRENT plan doesn't unlock yet — lets the bot make
     // a real, specific, correctly-priced upgrade pitch when a natural
     // opening comes up, instead of either staying silent or guessing.
-    const planFeatures = getPlanFeatures(planKey);
-    const lockedFeatures = Object.entries(FEATURE_REQUIRED_PLAN)
-      .filter(([key]) => !planFeatures[key])
-      .map(([key, requiredPlan]) => {
+    const planFeatures = await getPlanFeatures(planKey);
+    const requiredPlanMap = await getFeatureRequiredPlanMap(UPSELL_FEATURE_KEYS);
+    const lockedFeatures = UPSELL_FEATURE_KEYS
+      .filter((key) => !planFeatures[key] && requiredPlanMap[key])
+      .map((key) => {
         const labels = {
           moreTools: 'Study Planner, Study Catch-Up, and other extra tools', studyJourney: 'Study Journey',
           examMode: 'Exam Mode (guided walkthrough + timed exam)', studyBuddy: 'unlimited AI tutor chat',
           forecaster: 'the Question Forecaster', sidIQ: "SID's IQ adaptive learning profile",
         };
-        return `${labels[key] || key} (needs ${requiredPlan})`;
+        return `${labels[key] || key} (needs ${requiredPlanMap[key]})`;
       });
 
     const historyText = Array.isArray(history)
@@ -823,7 +828,7 @@ ${firstName ? `- Name: ${firstName}\n` : ''}- Recent quiz scores: ${recentScores
 - Weakest topics: ${weakStr}
 - Current streak: ${user?.currentStreak || 0} days, Level ${user?.level || 1}, ${user?.xp || 0} XP
 - Active study plan: ${planStr}
-- Current plan: ${PLAN_NAMES[planKey] || 'Free'}${lockedFeatures.length ? `\n- NOT yet unlocked on their plan: ${lockedFeatures.join('; ')}` : ' (already has full access to everything)'}
+- Current plan: ${await getPlanName(planKey)}${lockedFeatures.length ? `\n- NOT yet unlocked on their plan: ${lockedFeatures.join('; ')}` : ' (already has full access to everything)'}
 ${historyText ? `\nRecent conversation:\n${historyText}\n` : ''}
 Student's new message: "${message.trim()}"
 
@@ -857,7 +862,7 @@ Return JSON: { "reply": "...", "suggestedRoute": "/exact-route-from-list-or-null
     }
     if (!reply) return res.status(500).json({ error: 'AI returned an empty response.' });
 
-    if (tutorChatDailyLimit !== Infinity) {
+    if (tutorChatDailyLimit !== -1) {
       await User.updateOne({ _id: userId }, { $set: { tutorChatCount: usedToday + 1, tutorChatCountDate: new Date() } });
     }
 

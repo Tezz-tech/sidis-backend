@@ -13,6 +13,8 @@ const CatchUpSession = require("../models/CatchUpSession");
 const ExamModeSession = require("../models/ExamModeSession");
 const StudyPlan = require("../models/StudyPlan");
 const ExamForecast = require("../models/ExamForecast");
+const Package = require("../models/Package");
+const Referral = require("../models/Referral");
 const { extractPdfText, pdfParseAvailable } = require("../utils/pdfExtract");
 const { resolveUploadedFiles } = require("../utils/blobFetch");
 const { DISCIPLINE_MCQ_INSTRUCTION } = require("../utils/disciplinePrompt");
@@ -66,16 +68,6 @@ router.post("/login", async (req, res) => {
 
 // Every route below this line requires a valid admin JWT.
 router.use(adminAuth);
-
-const PLAN_CONFIG = {
-  exam_mode:          { name: 'Exam Mode',          amount: 725000,  durationDays: 3650 },
-  weekly_individual:  { name: 'Weekly Individual',  amount: 575000,  durationDays: 7    },
-  weekly_group:       { name: 'Weekly Group',       amount: 295000,  durationDays: 7    },
-  monthly_individual: { name: 'Monthly Individual', amount: 1525000, durationDays: 30   },
-  monthly_group:      { name: 'Monthly Group',      amount: 358400,  durationDays: 30   },
-  yearly_individual:  { name: 'Yearly Individual',  amount: 5025000, durationDays: 365  },
-  yearly_group:       { name: 'Yearly Group',       amount: 858300,  durationDays: 365  },
-};
 
 // ==================== USERS MANAGEMENT ====================
 
@@ -600,7 +592,7 @@ router.patch("/subscriptions/:id/activate", async (req, res) => {
     const sub = await Subscription.findById(req.params.id);
     if (!sub) return res.status(404).json({ error: "Subscription not found" });
 
-    const planCfg = PLAN_CONFIG[sub.plan];
+    const planCfg = await Package.findOne({ key: sub.plan }).lean();
     const days    = req.body.durationDays || planCfg?.durationDays || 30;
     const now     = new Date();
 
@@ -611,6 +603,195 @@ router.patch("/subscriptions/:id/activate", async (req, res) => {
     res.json({ success: true, message: "Subscription activated", subscription: sub });
   } catch (err) {
     res.status(500).json({ error: "Failed to activate subscription" });
+  }
+});
+
+// ==================== PACKAGES MANAGEMENT ====================
+// What a plan costs and what it unlocks — replaces the old hardcoded PLANS
+// objects. `key` is immutable once created (Subscription.plan references it
+// by string), so edits can change price/duration/access/display copy, but
+// never the key itself.
+
+/* GET /admin/packages — every package, active or not (admin needs to see
+   disabled ones too, to re-enable or confirm what existing subscribers are
+   still on). */
+router.get("/packages", async (req, res) => {
+  try {
+    const packages = await Package.find({}).sort({ sortOrder: 1, amount: 1 }).lean();
+    res.json({ success: true, packages });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch packages" });
+  }
+});
+
+const KEY_PATTERN = /^[a-z][a-z0-9_]{1,40}$/;
+
+/* POST /admin/packages — create a new package */
+router.post("/packages", async (req, res) => {
+  try {
+    const { key, name, amount, durationDays, isGroup, active, popular, badge, color, sortOrder, displayFeatures, access } = req.body || {};
+
+    if (!key || !KEY_PATTERN.test(key))
+      return res.status(400).json({ error: "Key is required and must be lowercase letters/numbers/underscores, starting with a letter." });
+    if (!name || !name.trim())
+      return res.status(400).json({ error: "Name is required." });
+    if (typeof amount !== 'number' || amount < 0)
+      return res.status(400).json({ error: "Amount must be a non-negative number (in kobo)." });
+    if (typeof durationDays !== 'number' || durationDays < 0)
+      return res.status(400).json({ error: "Duration (days) must be a non-negative number." });
+
+    const existing = await Package.findOne({ key });
+    if (existing) return res.status(409).json({ error: `A package with key "${key}" already exists.` });
+
+    const pkg = await Package.create({
+      key, name: name.trim(), amount, durationDays,
+      isGroup: !!isGroup, active: active !== false, popular: !!popular,
+      badge: badge || '', color: color || 'from-orange-500 to-pink-600',
+      sortOrder: sortOrder || 0,
+      displayFeatures: Array.isArray(displayFeatures) ? displayFeatures.filter(Boolean) : [],
+      access: access && typeof access === 'object' ? access : {},
+    });
+
+    res.status(201).json({ success: true, package: pkg });
+  } catch (err) {
+    console.error("Create package error:", err);
+    res.status(500).json({ error: err.message || "Failed to create package" });
+  }
+});
+
+/* PATCH /admin/packages/:id — update everything except `key` */
+router.patch("/packages/:id", async (req, res) => {
+  try {
+    const pkg = await Package.findById(req.params.id);
+    if (!pkg) return res.status(404).json({ error: "Package not found" });
+
+    const { name, amount, durationDays, isGroup, active, popular, badge, color, sortOrder, displayFeatures, access } = req.body || {};
+
+    if (name !== undefined) {
+      if (!name.trim()) return res.status(400).json({ error: "Name cannot be empty." });
+      pkg.name = name.trim();
+    }
+    if (amount !== undefined) {
+      if (typeof amount !== 'number' || amount < 0) return res.status(400).json({ error: "Amount must be a non-negative number." });
+      pkg.amount = amount;
+    }
+    if (durationDays !== undefined) {
+      if (typeof durationDays !== 'number' || durationDays < 0) return res.status(400).json({ error: "Duration must be a non-negative number." });
+      pkg.durationDays = durationDays;
+    }
+    if (isGroup !== undefined) pkg.isGroup = !!isGroup;
+    if (active !== undefined) {
+      if (pkg.key === 'free' && active === false)
+        return res.status(400).json({ error: "The free plan can't be deactivated — every unpaid user falls back to it." });
+      pkg.active = !!active;
+    }
+    if (popular !== undefined) pkg.popular = !!popular;
+    if (badge !== undefined) pkg.badge = badge;
+    if (color !== undefined) pkg.color = color;
+    if (sortOrder !== undefined) pkg.sortOrder = sortOrder;
+    if (Array.isArray(displayFeatures)) pkg.displayFeatures = displayFeatures.filter(Boolean);
+    if (access && typeof access === 'object') pkg.access = { ...pkg.access.toObject(), ...access };
+
+    await pkg.save();
+    res.json({ success: true, package: pkg });
+  } catch (err) {
+    console.error("Update package error:", err);
+    res.status(500).json({ error: err.message || "Failed to update package" });
+  }
+});
+
+/* DELETE /admin/packages/:id — blocked for the free plan, and for any
+   package that already has subscriptions (deactivate instead, so existing
+   subscribers' records don't silently lose their plan reference). */
+router.delete("/packages/:id", async (req, res) => {
+  try {
+    const pkg = await Package.findById(req.params.id);
+    if (!pkg) return res.status(404).json({ error: "Package not found" });
+    if (pkg.key === 'free')
+      return res.status(400).json({ error: "The free plan can't be deleted." });
+
+    const subCount = await Subscription.countDocuments({ plan: pkg.key });
+    if (subCount > 0)
+      return res.status(409).json({ error: `${subCount} subscription(s) reference this plan — set it to inactive instead of deleting it.` });
+
+    await pkg.deleteOne();
+    res.json({ success: true, message: "Package deleted" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete package" });
+  }
+});
+
+// ==================== REFERRALS MANAGEMENT ====================
+
+/* GET /admin/referrals — paginated, with referrer + referred user info */
+router.get("/referrals", async (req, res) => {
+  try {
+    const page   = parseInt(req.query.page)  || 1;
+    const limit  = parseInt(req.query.limit) || 15;
+    const skip   = (page - 1) * limit;
+    const status = req.query.status;
+
+    const query = {};
+    if (status && status !== 'all') query.status = status;
+
+    const [referrals, total] = await Promise.all([
+      Referral.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('referrerId', 'fullName email')
+        .populate('referredId', 'fullName email')
+        .lean(),
+      Referral.countDocuments(query),
+    ]);
+
+    res.json({
+      success: true,
+      referrals: referrals.map(r => ({
+        id: r._id,
+        code: r.code,
+        status: r.status,
+        referrer: r.referrerId ? { id: r.referrerId._id, fullName: r.referrerId.fullName, email: r.referrerId.email } : null,
+        referred: r.referredId ? { id: r.referredId._id, fullName: r.referredId.fullName, email: r.referredId.email } : null,
+        createdAt: r.createdAt,
+        convertedAt: r.convertedAt,
+      })),
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
+  } catch (err) {
+    console.error("Fetch referrals error:", err);
+    res.status(500).json({ error: "Failed to fetch referrals" });
+  }
+});
+
+/* GET /admin/referrals/stats — totals + top referrers by converted count */
+router.get("/referrals/stats", async (req, res) => {
+  try {
+    const [total, pending, converted, topReferrers] = await Promise.all([
+      Referral.countDocuments(),
+      Referral.countDocuments({ status: 'pending' }),
+      Referral.countDocuments({ status: 'converted' }),
+      Referral.aggregate([
+        { $match: { status: 'converted' } },
+        { $group: { _id: '$referrerId', converted: { $sum: 1 } } },
+        { $sort: { converted: -1 } },
+        { $limit: 10 },
+        { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'user' } },
+        { $unwind: '$user' },
+        { $project: { fullName: '$user.fullName', email: '$user.email', converted: 1 } },
+      ]),
+    ]);
+
+    const conversionRate = total > 0 ? Math.round((converted / total) * 100) : 0;
+
+    res.json({
+      success: true,
+      stats: { total, pending, converted, conversionRate },
+      topReferrers: topReferrers.map(t => ({ id: t._id, fullName: t.fullName, email: t.email, converted: t.converted })),
+    });
+  } catch (err) {
+    console.error("Referral stats error:", err);
+    res.status(500).json({ error: "Failed to fetch referral stats" });
   }
 });
 

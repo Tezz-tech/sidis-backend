@@ -13,10 +13,9 @@ const GroupMemberSchema = new mongoose.Schema({
 
 const subscriptionSchema = new mongoose.Schema({
   userId:               { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  plan:                 { type: String, required: true,
-                          enum: ['exam_mode','weekly_individual','weekly_group',
-                                 'monthly_individual','monthly_group',
-                                 'yearly_individual','yearly_group'] },
+  // No enum — plan keys now come from the admin-managed Package collection
+  // (see models/Package.js), which can grow/shrink over time.
+  plan:                 { type: String, required: true },
   planName:             { type: String, required: true },
   amount:               { type: Number, required: true },   // kobo
   currency:             { type: String, default: 'NGN' },

@@ -179,7 +179,7 @@ router.get('/sid-iq', auth, async (req, res) => {
     const userId = req.user.userId;
 
     const plan     = await getUserPlan(userId);
-    const features = getPlanFeatures(plan);
+    const features = await getPlanFeatures(plan);
     if (!features.sidIQ) {
       return res.status(403).json({
         error:    'plan_required',

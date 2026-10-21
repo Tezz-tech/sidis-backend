@@ -15,12 +15,12 @@ const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
 const { resolveUploadedFiles } = require('../utils/blobFetch');
 const { DISCIPLINE_MIXED_INSTRUCTION } = require('../utils/disciplinePrompt');
 
-// Only Exam Mode and plans that already include it (see PLAN_FEATURES.examMode
-// in utils/subscription.js — mirrors studyJourney's exact distribution).
+// Only Exam Mode and plans that already include it (see the `examMode` flag
+// on each Package.access in models/Package.js).
 async function requireExamModeAccess(req, res, next) {
   try {
     const plan     = await getUserPlan(req.user.userId);
-    const features = getPlanFeatures(plan);
+    const features = await getPlanFeatures(plan);
     if (!features.examMode) {
       return res.status(403).json({
         error:    'plan_required',
@@ -41,7 +41,7 @@ async function requireExamModeAccess(req, res, next) {
 // exam_mode plan's own 5/month allowance.
 async function checkAndReportQuota(userId) {
   const plan     = await getUserPlan(userId);
-  const features = getPlanFeatures(plan);
+  const features = await getPlanFeatures(plan);
   if (features.unlimitedQuizzes) return null;
 
   const monthStart = new Date();

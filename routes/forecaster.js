@@ -11,7 +11,7 @@ const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
 async function requireForecasterAccess(req, res, next) {
   try {
     const plan     = await getUserPlan(req.user.userId);
-    const features = getPlanFeatures(plan);
+    const features = await getPlanFeatures(plan);
     if (!features.forecaster) {
       return res.status(403).json({
         error:    'plan_required',
