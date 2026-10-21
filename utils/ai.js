@@ -19,15 +19,24 @@ require('dotenv').config();
 // Tried in this order for every request. Keep the most reliable/cheapest
 // model first — later entries are only reached once earlier ones are
 // rate-limited or unavailable. An invalid/unreleased model name here is
-// harmless: it just fails fast (treated as "unavailable") and we move on.
+// NOT harmless in practice: a hard-404 model still costs a full round trip
+// on every single AI call in the app before failover moves on, which is
+// exactly what silently made every AI feature feel slow/broken here
+// (gemini-2.5-flash and bare gemini-3-flash were both dead for this key —
+// confirmed via a live generateContent probe against every candidate on
+// 2026-10-21, not just GenerativeModel.ListModels, since a model can be
+// listed there yet still 404 on an actual call for a given key/account).
+// Includes a couple of Google's self-updating "-latest" aliases on
+// purpose, specifically so this list doesn't need to be hand-maintained
+// forever as concrete dated models get deprecated out from under it again.
 const MODELS = [
-  'gemini-2.5-flash',
-  'gemini-3-flash',
-  'gemini-3.1-flash-lite',
-  'gemini-3.5-flash',
   'gemini-3.5-flash-lite',
-  'gemini-3.6-flash',
-  'gemini-3.7-flash',
+  'gemini-flash-lite-latest',
+  'gemini-3.5-flash',
+  'gemini-3-flash-preview',
+  'gemini-flash-latest',
+  'gemini-3.8-flash',
+  'gemini-pro-latest',
 ];
 
 const MAX_TRANSIENT_RETRIES = 2; // in-place retries for a genuine transient blip, same model+key

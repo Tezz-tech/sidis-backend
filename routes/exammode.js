@@ -186,7 +186,7 @@ async function generateExamQuiz(session) {
     title:          quizTitle,
     subject:        session.subject,
     difficulty:     'hard',
-    timeLimit:      Math.max(20, Math.ceil(questions.length * 3)),
+    timeLimit:      Math.max(15, Math.ceil(questions.length * 0.75)),
     numQuestions:   questions.length,
     questionType:   'mixed',
     questions,
@@ -252,7 +252,7 @@ async function generateMoreExamQuestions(session, quiz, requestedCount) {
 
   quiz.questions.push(...newQuestions);
   quiz.numQuestions = quiz.questions.length;
-  quiz.timeLimit    = Math.max(quiz.timeLimit || 0, Math.ceil(quiz.questions.length * 3));
+  quiz.timeLimit    = Math.max(quiz.timeLimit || 0, Math.ceil(quiz.questions.length * 0.75));
   await quiz.save();
   return newQuestions.length;
 }
