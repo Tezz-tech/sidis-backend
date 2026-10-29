@@ -27,6 +27,15 @@ const subscriptionSchema = new mongoose.Schema({
   expiresAt:            { type: Date, index: true },
   isGroup:              { type: Boolean, default: false },
   members:              { type: [GroupMemberSchema], default: [] },
+  // Discount applied at checkout, if any — `amount` above is already the
+  // discounted price actually charged; these are kept only so the exact
+  // discount can be shown/audited later and so the source code can be
+  // marked consumed only once, at activation (see convertReferralIfPending's
+  // sibling, redeemDiscountIfPending, in routes/payments.js).
+  discountCode:         { type: String, default: null },
+  discountPercent:      { type: Number, default: 0 },
+  discountSource:       { type: String, enum: ['admin', 'spin', null], default: null },
+  originalAmount:       { type: Number, default: null }, // pre-discount price, kobo
 }, { timestamps: true });
 
 // Helper: is this subscription currently active?

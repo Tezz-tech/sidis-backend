@@ -15,6 +15,13 @@ const FlashcardSetSchema = new mongoose.Schema({
   title:        { type: String, required: true },
   subject:      { type: String, required: true },
   cards:        [CardSchema],
+  // Source material this set was generated from, capped — lets "Add More
+  // Cards" generate genuinely new, non-duplicate cards grounded in the
+  // same content later, instead of guessing from the subject name alone.
+  // Empty for manually-created sets or vision-mode uploads (no text
+  // transcript was ever produced) — those fall back to a subject/topic-only
+  // generation when more cards are requested.
+  sourceText:   { type: String, default: '' },
   masteryLevel: { type: Number, default: 0 },
   lastStudied:  { type: Date },
   createdAt:    { type: Date, default: Date.now },

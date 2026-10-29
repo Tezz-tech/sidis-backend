@@ -15,9 +15,11 @@ const StudyPlan = require("../models/StudyPlan");
 const ExamForecast = require("../models/ExamForecast");
 const Package = require("../models/Package");
 const Referral = require("../models/Referral");
+const DiscountCode = require("../models/DiscountCode");
 const { extractPdfText, pdfParseAvailable } = require("../utils/pdfExtract");
 const { resolveUploadedFiles } = require("../utils/blobFetch");
 const { DISCIPLINE_MCQ_INSTRUCTION } = require("../utils/disciplinePrompt");
+const { getDifficultyInstruction } = require("../utils/difficultyPrompt");
 const mammoth = require("mammoth");
 const adminAuth = require("../middlewares/adminAuth");
 
@@ -795,6 +797,83 @@ router.get("/referrals/stats", async (req, res) => {
   }
 });
 
+// ==================== DISCOUNT CODES ====================
+// Global, admin-created codes — distinct from the per-user codes the spin
+// wheel awards (those live on User.discounts and are never editable here).
+// Both are checked/redeemed together via resolveDiscount() in payments.js.
+
+router.get("/discount-codes", async (req, res) => {
+  try {
+    const codes = await DiscountCode.find({}).sort({ createdAt: -1 }).lean();
+    res.json({ success: true, codes });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch discount codes" });
+  }
+});
+
+router.post("/discount-codes", async (req, res) => {
+  try {
+    const { code, percentOff, active, maxUses, expiresAt, planKey, note } = req.body || {};
+    const normalized = (code || '').trim().toUpperCase();
+    if (!/^[A-Z0-9_-]{3,30}$/.test(normalized))
+      return res.status(400).json({ error: "Code must be 3-30 characters: letters, numbers, underscore, or hyphen." });
+    if (typeof percentOff !== 'number' || percentOff < 1 || percentOff > 100)
+      return res.status(400).json({ error: "Percent off must be between 1 and 100." });
+
+    const existing = await DiscountCode.findOne({ code: normalized });
+    if (existing) return res.status(409).json({ error: `A discount code "${normalized}" already exists.` });
+
+    const created = await DiscountCode.create({
+      code: normalized,
+      percentOff,
+      active: active !== false,
+      maxUses: (typeof maxUses === 'number' && maxUses > 0) ? maxUses : null,
+      expiresAt: expiresAt ? new Date(expiresAt) : null,
+      planKey: planKey || null,
+      note: note || '',
+    });
+    res.status(201).json({ success: true, discountCode: created });
+  } catch (err) {
+    console.error("Create discount code error:", err);
+    res.status(500).json({ error: err.message || "Failed to create discount code" });
+  }
+});
+
+router.patch("/discount-codes/:id", async (req, res) => {
+  try {
+    const dc = await DiscountCode.findById(req.params.id);
+    if (!dc) return res.status(404).json({ error: "Discount code not found" });
+
+    const { percentOff, active, maxUses, expiresAt, planKey, note } = req.body || {};
+    if (percentOff !== undefined) {
+      if (typeof percentOff !== 'number' || percentOff < 1 || percentOff > 100)
+        return res.status(400).json({ error: "Percent off must be between 1 and 100." });
+      dc.percentOff = percentOff;
+    }
+    if (active !== undefined) dc.active = !!active;
+    if (maxUses !== undefined) dc.maxUses = (typeof maxUses === 'number' && maxUses > 0) ? maxUses : null;
+    if (expiresAt !== undefined) dc.expiresAt = expiresAt ? new Date(expiresAt) : null;
+    if (planKey !== undefined) dc.planKey = planKey || null;
+    if (note !== undefined) dc.note = note;
+
+    await dc.save();
+    res.json({ success: true, discountCode: dc });
+  } catch (err) {
+    console.error("Update discount code error:", err);
+    res.status(500).json({ error: err.message || "Failed to update discount code" });
+  }
+});
+
+router.delete("/discount-codes/:id", async (req, res) => {
+  try {
+    const dc = await DiscountCode.findByIdAndDelete(req.params.id);
+    if (!dc) return res.status(404).json({ error: "Discount code not found" });
+    res.json({ success: true, message: "Discount code deleted" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete discount code" });
+  }
+});
+
 // ==================== ANALYTICS & DASHBOARD STATS ====================
 
 /* Dashboard summary stats — includes subscription data */
@@ -927,7 +1006,7 @@ router.post("/quizzes/generate", async (req, res) => {
     if (!useVision && !extractedText.trim()) return res.status(400).json({ error: "No readable text found" });
 
     const safeText = capText(extractedText, 60000);
-    const prompt = `Generate ${numQuestions} multiple-choice questions.\nSubject: ${subject}. Difficulty: ${difficulty}.\n${DISCIPLINE_MCQ_INSTRUCTION}\nIf the content contains any calculations or numeric worked examples, test them properly — don't skip calculation-based content.\nReturn ONLY a valid JSON array, no markdown:\n[{"question":"...","options":["A","B","C","D"],"correctAnswer":0}]\n${useVision ? "The content is attached as a PDF file — read all text AND any diagrams, charts, tables, or images it contains." : `Content:\n${safeText}`}`.trim();
+    const prompt = `Generate ${numQuestions} multiple-choice questions.\nSubject: ${subject}.\n${getDifficultyInstruction(difficulty)}\n${DISCIPLINE_MCQ_INSTRUCTION}\nIf the content contains any calculations or numeric worked examples, test them properly — don't skip calculation-based content.\nReturn ONLY a valid JSON array, no markdown:\n[{"question":"...","options":["A","B","C","D"],"correctAnswer":0}]\n${useVision ? "The content is attached as a PDF file — read all text AND any diagrams, charts, tables, or images it contains." : `Content:\n${safeText}`}`.trim();
 
     let questions;
     try {

@@ -16,6 +16,7 @@ try { ({ awardXP } = require("../utils/gamificationUtils")); } catch (_) {}
 const { gemini, capText } = require("../utils/ai");
 const { resolveSpecificSubject } = require("../utils/subjectResolver");
 const { DISCIPLINE_MIXED_INSTRUCTION, DISCIPLINE_MCQ_INSTRUCTION } = require("../utils/disciplinePrompt");
+const { getDifficultyInstruction } = require("../utils/difficultyPrompt");
 const { processQuizResult } = require("../utils/adaptiveEngine");
 const { computeAndSyncUserStats } = require("../utils/userStats");
 
@@ -349,9 +350,10 @@ Return ONLY valid JSON: { "transcript": "..." }`;
       prompt = `
 You are a teacher creating SHORT ANSWER / ESSAY questions.
 ${needsSubjectInference ? `The content covers an academic topic — identify it.` : `Subject: ${resolvedSubject}`}
-Difficulty: ${difficulty}
 Count: ${numQuestions} questions
 ${isTopicOnly ? `Topic: ${topic}` : `Based strictly on the provided text.`}
+
+${getDifficultyInstruction(difficulty)}
 
 ${DISCIPLINE_MIXED_INSTRUCTION}
 
@@ -374,9 +376,10 @@ ${isTopicOnly ? "" : `Text:\n${safeContent}`}
       prompt = `
 You are an expert exam-paper setter creating a REALISTIC EXAM PAPER that mixes multiple-choice (objective) and short-answer/essay (theory) questions — exactly how a real exam in this subject is conventionally structured, not an arbitrary split.
 ${needsSubjectInference ? `The content covers an academic topic — identify it.` : `Subject: ${resolvedSubject}`}
-Difficulty: ${difficulty}
 Total questions: ${numQuestions}
 ${isTopicOnly ? `Topic: ${topic}` : `Based strictly on the provided text.`}
+
+${getDifficultyInstruction(difficulty)}
 
 ${DISCIPLINE_MIXED_INSTRUCTION}
 Include at least one of each type (mcq and essay) when the total allows it.
@@ -397,9 +400,10 @@ ${isTopicOnly ? "" : `Text:\n${safeContent}`}
       prompt = `
 You are a teacher creating a multiple-choice quiz.
 ${needsSubjectInference ? `The content covers an academic topic — identify it.` : `Subject: ${resolvedSubject}`}
-Difficulty: ${difficulty}
 Count: ${numQuestions} questions
 ${isTopicOnly ? `Topic: ${topic}` : `Based strictly on the provided text.`}
+
+${getDifficultyInstruction(difficulty)}
 
 ${DISCIPLINE_MCQ_INSTRUCTION}
 

@@ -108,6 +108,7 @@ ${useVision ? "The content is attached as a PDF file — read all text AND any d
         masteryLevel: 0,
         topic: c.topic || "",
       })),
+      sourceText: useVision ? "" : safeText,
     });
 
     await flashcardSet.save();
@@ -273,6 +274,66 @@ router.post("/sets/:id/study", auth, async (req, res) => {
     res.json({ success: true, masteryLevel: card.masteryLevel });
   } catch (err) {
     res.status(500).json({ error: "Failed to update" });
+  }
+});
+
+// ==================== ADD MORE CARDS ====================
+// Appends new, non-duplicate cards to an existing set — grounded in the
+// set's stored sourceText when available (sets generated from a PDF/pasted
+// text), falling back to subject + existing card topics for manually-
+// created sets or vision-mode uploads (which never had a text transcript).
+const ADD_CARDS_MAX_PER_CALL = 30;
+
+router.post("/sets/:id/add-cards", auth, async (req, res) => {
+  if (!gemini.ready) return res.status(503).json({ error: "AI service is temporarily unavailable. Please try again shortly." });
+
+  try {
+    const set = await FlashcardSet.findOne({ _id: req.params.id, userId: req.user.userId });
+    if (!set) return res.status(404).json({ error: "Set not found" });
+
+    const requestedCount = parseInt(req.body?.count, 10);
+    const targetCount = Math.min(Number.isFinite(requestedCount) && requestedCount > 0 ? requestedCount : 10, ADD_CARDS_MAX_PER_CALL);
+
+    const existingTopics = set.cards.map(c => c.topic).filter(Boolean);
+    const existingQuestions = set.cards.map(c => c.question).filter(Boolean);
+
+    const prompt = set.sourceText
+      ? `You are an expert flashcard creator. Generate ${targetCount} NEW high-quality flashcards from this content — grounded strictly in the material below, not generic facts about the subject.
+Subject: ${set.subject}
+Content:
+${capText(set.sourceText, 30000)}
+${existingTopics.length ? `\nCards already made covering: ${existingTopics.join('; ')}. Do NOT repeat these — cover different sub-topics or angles still untested in the material.` : ''}
+Return ONLY a valid JSON array, no markdown:
+[{"question":"...","answer":"...","topic":"the specific sub-topic this card tests"}]`
+      : `You are an expert flashcard creator. Generate ${targetCount} NEW high-quality flashcards for the subject "${set.subject}".
+${existingQuestions.length ? `Cards that already exist in this set (do NOT repeat these or anything too similar):\n${existingQuestions.slice(0, 40).map(q => `- ${q}`).join('\n')}` : ''}
+Return ONLY a valid JSON array, no markdown:
+[{"question":"...","answer":"...","topic":"the specific sub-topic this card tests"}]`;
+
+    let cards;
+    try {
+      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 4096, temperature: 0.6 });
+      cards = Array.isArray(parsed) ? parsed : parsed?.cards || parsed?.flashcards || [];
+    } catch (aiErr) {
+      console.error("Add cards AI error:", aiErr.message);
+      return res.status(500).json({ error: `AI failed to generate more cards: ${aiErr.message}` });
+    }
+
+    cards = cards
+      .map(c => ({ question: (c.question || "").trim(), answer: (c.answer || "").trim(), topic: (c.topic || "").trim() }))
+      .filter(c => c.question && c.answer)
+      .slice(0, targetCount);
+
+    if (cards.length === 0)
+      return res.status(500).json({ error: "AI could not generate further distinct cards. Please try again." });
+
+    set.cards.push(...cards.map(c => ({ question: c.question, answer: c.answer, masteryLevel: 0, topic: c.topic })));
+    await set.save();
+
+    res.json({ success: true, addedCount: cards.length, totalCards: set.cards.length, cards: set.cards });
+  } catch (err) {
+    console.error("Add cards error:", err);
+    res.status(500).json({ error: err.message || "Failed to add more cards" });
   }
 });
 

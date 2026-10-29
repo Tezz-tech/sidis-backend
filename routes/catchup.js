@@ -473,8 +473,8 @@ router.post('/:id/chat', auth, async (req, res) => {
     if (!gemini.ready)
       return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
 
-    const { message, history } = req.body;
-    if (!message || !message.trim()) return res.status(400).json({ error: 'message is required' });
+    const { message, history, start } = req.body;
+    if (!start && (!message || !message.trim())) return res.status(400).json({ error: 'message is required' });
 
     const session = await CatchUpSession.findOne({ _id: req.params.id, userId: req.user.userId });
     if (!session) return res.status(404).json({ error: 'Catch-up session not found.' });
@@ -483,16 +483,28 @@ router.post('/:id/chat', auth, async (req, res) => {
       ? history.slice(-6).map(h => `${h.role === 'user' ? 'Student' : 'Tutor'}: ${h.content}`).join('\n')
       : '';
 
-    const prompt = `You are a patient, expert tutor helping a student catch up on ${session.subject} material they missed, grounded in this content:
+    // `start` — Understanding opens with the tutor asking a question, not
+    // the student waiting to think of one; the frontend fires this once,
+    // silently, the moment this phase is entered.
+    const prompt = start
+      ? `You are a patient, expert tutor opening a catch-up session on ${session.subject} material a student missed, grounded in this content:
+
+${session.combinedText.slice(0, 40000)}
+${session.summary?.overview ? `\nSummary already given to the student: ${session.summary.overview}` : ''}
+
+This is the very first message — nothing from the student to respond to yet. Open by asking ONE genuinely good question that checks real understanding of an important point in the material (not trivial recall). You may add one short, warm sentence before it, but get to the question quickly.
+
+Return ONLY valid JSON: { "reply": "..." }`
+      : `You are a patient, expert tutor helping a student catch up on ${session.subject} material they missed, grounded in this content:
 
 ${session.combinedText.slice(0, 40000)}
 ${session.summary?.overview ? `\nSummary already given to the student: ${session.summary.overview}` : ''}
 ${historyText ? `\nConversation so far:\n${historyText}\n` : ''}
 Student's new message: "${message.trim()}"
 
-Answer their question clearly and helpfully, drawing only on the material above. If they seem to misunderstand something, gently correct it. If the question involves a calculation or numeric working, show the full step-by-step working, not just the final answer. No markdown headers.
+Respond to their message, drawing only on the material above — answer if they asked something, correct them gently if they misunderstood, give feedback if they just answered a question of yours — THEN ask another question yourself so they always have something of yours to answer rather than being left to think of their own. If a calculation is involved, show the full step-by-step working, not just the final answer. No markdown headers.
 
-Match your length to the question: a quick/direct question gets a short, direct answer (1-3 sentences) — don't pad it out. When they ask for an explanation, say "explain", "why", "I don't get it", or ask something genuinely conceptual, go as deep and thorough as the topic needs, with full working for any calculation — don't cut a real explanation short just to stay brief.
+Match your length to the question: a quick/direct question gets a short, direct answer (1-3 sentences) plus your next question — don't pad it out. When they ask for an explanation, say "explain", "why", "I don't get it", or ask something genuinely conceptual, go as deep and thorough as the topic needs, with full working for any calculation, but still follow it with your next question once you're done.
 
 Return ONLY valid JSON: { "reply": "..." }`;
 
@@ -556,6 +568,7 @@ ${session.combinedText.slice(0, 40000)}`;
       subject: session.subject,
       cards:   cards.map(c => ({ question: c.question, answer: c.answer, masteryLevel: 0, topic: c.topic })),
       isPublic: false,
+      sourceText: session.combinedText.slice(0, 30000),
     });
 
     session.flashcardSetId    = flashcardSet._id;

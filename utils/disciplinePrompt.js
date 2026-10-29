@@ -20,7 +20,9 @@ const DISCIPLINE_CORE = `Before writing any question, identify the SPECIFIC acad
 - Mathematics / Engineering / Statistics: genuine multi-step problems requiring real derivation, proof, or calculation with full working shown — never a single-step lookup.
 - Humanities / Literature / Social Sciences: critical-analysis or argument-based questions that require interpretation and reasoning, not fact trivia.
 - Any other discipline not listed above: infer its real assessment convention directly from the material's own style and match it — look at how the source document itself poses questions or explains concepts for cues.
-A question's real difficulty comes from requiring genuine reasoning, computation, or application within that discipline's own conventions — never from vocabulary alone.`;
+A question's real difficulty comes from requiring genuine reasoning, computation, or application within that discipline's own conventions — never from vocabulary alone.
+
+Notation: the source material may contain mathematical, chemical, or scientific notation (exponents, subscripts, fractions, roots, Greek letters, formulas — e.g. an uploaded or pasted "$I^A$" or "H_2O"). Read it correctly as that notation, not as stray punctuation. When YOUR OWN question, option, or explanation text needs to express such notation, write it using standard inline LaTeX delimited by single dollar signs, e.g. $x^2$, $H_2O$, $\\frac{a}{b}$, $\\alpha$ — never spell it out in words (e.g. write $I^A$, not "I to the power of A") and never use plain-text approximations like "I^A" or "x2" outside of $...$.`;
 
 // For prompts that can mix objective (MCQ) and theory/essay questions.
 const DISCIPLINE_MIXED_INSTRUCTION = `${DISCIPLINE_CORE}

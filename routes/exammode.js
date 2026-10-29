@@ -450,8 +450,8 @@ router.post('/:id/qa-chat', auth, requireExamModeAccess, async (req, res) => {
     if (!gemini.ready)
       return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
 
-    const { message, history } = req.body;
-    if (!message || !message.trim()) return res.status(400).json({ error: 'message is required' });
+    const { message, history, start } = req.body;
+    if (!start && (!message || !message.trim())) return res.status(400).json({ error: 'message is required' });
 
     const session = await ExamModeSession.findOne({ _id: req.params.id, userId: req.user.userId });
     if (!session) return res.status(404).json({ error: 'Exam session not found.' });
@@ -460,15 +460,27 @@ router.post('/:id/qa-chat', auth, requireExamModeAccess, async (req, res) => {
       ? history.slice(-6).map(h => `${h.role === 'user' ? 'Student' : 'Tutor'}: ${h.content}`).join('\n')
       : '';
 
-    const prompt = `You are an expert exam-prep tutor running a Q&A study session with a student on ${session.subject}, grounded in this material:
+    // `start` — the Understanding phase opens with the TUTOR asking a
+    // question, not the student; the frontend fires this once, silently,
+    // the moment this phase is entered, before the student has typed
+    // anything. Every message after that is the normal reactive branch.
+    const prompt = start
+      ? `You are an expert exam-prep tutor opening a Q&A study session with a student on ${session.subject}, grounded in this material:
+
+${session.combinedText.slice(0, 40000)}
+
+This is the very first message of the session — there is nothing from the student to respond to yet. Open by asking ONE genuinely good question that tests real understanding of an important point in the material (not a trivial recall question). You may add one short, warm sentence before it, but get to the question quickly — don't explain what you're about to do.
+
+Return ONLY valid JSON: { "reply": "...", "readyForExam": false }`
+      : `You are an expert exam-prep tutor running a Q&A study session with a student on ${session.subject}, grounded in this material:
 
 ${session.combinedText.slice(0, 40000)}
 ${historyText ? `\nConversation so far:\n${historyText}\n` : ''}
 Student's new message: "${message.trim()}"
 
-Your job: question the student on the material (don't just answer whatever they ask — actively test their understanding), give honest feedback on their answers, and correct misunderstandings. If a calculation is involved, show the full step-by-step working, not just the final answer. Once they've engaged substantively across several exchanges and seem to genuinely understand the material, start naturally offering to move to the timed exam. No markdown headers.
+Your job: question the student on the material (don't just answer whatever they ask — actively test their understanding), give honest feedback on their answers, and correct misunderstandings, THEN ask the next question yourself — the student should always have a question of yours to answer, never be left waiting for them to think of one. If a calculation is involved, show the full step-by-step working, not just the final answer. Once they've engaged substantively across several exchanges and seem to genuinely understand the material, start naturally offering to move to the timed exam. No markdown headers.
 
-Match your length to the moment: most exchanges here should be short and conversational (1-3 sentences) — a quick question, quick feedback, keep it moving. When they ask you to explain something, say "why", "I don't get it", or ask a genuinely conceptual question, go as deep and thorough as it needs, with full working for any calculation — don't cut a real explanation short just to stay brief.
+Match your length to the moment: most exchanges here should be short and conversational (1-3 sentences) — feedback plus your next question, keep it moving. When they ask you to explain something, say "why", "I don't get it", or ask a genuinely conceptual question, go as deep and thorough as it needs, with full working for any calculation — don't cut a real explanation short just to stay brief, but still follow it with your next question once you're done explaining.
 
 Return ONLY valid JSON: { "reply": "...", "readyForExam": true or false }
 readyForExam should only be true once real understanding has been demonstrated across the conversation — never on the very first message.`;

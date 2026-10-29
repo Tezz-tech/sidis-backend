@@ -8,6 +8,7 @@ const Subscription = require('../models/Subscription');
 const User         = require('../models/User');
 const Quiz         = require('../models/Quiz');
 const Referral     = require('../models/Referral');
+const DiscountCode = require('../models/DiscountCode');
 const { getPlanFeatures, getPlanName, getEffectiveSubscription, getPackageByKey, getAllActivePackages } = require('../utils/subscription');
 const MAX_GROUP_MEMBERS = 2;
 
@@ -27,6 +28,53 @@ async function convertReferralIfPending(userId, subscriptionId) {
     if (ref) console.log(`[referrals] converted referral ${ref._id} for user ${userId}`);
   } catch (err) {
     console.error('[referrals] conversion error:', err.message);
+  }
+}
+
+// Checks a discount code against BOTH sources: admin-created global codes
+// (DiscountCode collection) and the user's own spin-wheel winnings
+// (User.discounts) — checked in that order since an admin code is never
+// tied to one user. Returns { percentOff, source, code } or { error }.
+async function resolveDiscount(code, userId, planKey) {
+  const normalized = (code || '').trim().toUpperCase();
+  if (!normalized) return { error: 'Enter a discount code.' };
+
+  const adminCode = await DiscountCode.findOne({ code: normalized });
+  if (adminCode) {
+    if (!adminCode.active) return { error: 'This discount code is no longer active.' };
+    if (adminCode.expiresAt && adminCode.expiresAt < new Date()) return { error: 'This discount code has expired.' };
+    if (adminCode.maxUses !== null && adminCode.usedCount >= adminCode.maxUses) return { error: 'This discount code has reached its usage limit.' };
+    if (adminCode.planKey && adminCode.planKey !== planKey) return { error: `This code only applies to the ${adminCode.planKey} plan.` };
+    return { percentOff: adminCode.percentOff, source: 'admin', code: normalized };
+  }
+
+  const user = await User.findById(userId).select('discounts').lean();
+  const own = (Array.isArray(user?.discounts) ? user.discounts : []).find(d => d.code === normalized);
+  if (own) {
+    if (own.used) return { error: 'This discount code has already been used.' };
+    if (new Date(own.expiresAt) < new Date()) return { error: 'This discount code has expired.' };
+    return { percentOff: own.value, source: 'spin', code: normalized };
+  }
+
+  return { error: 'Invalid discount code.' };
+}
+
+// Marks a redeemed discount as consumed — called only once, right after a
+// payment actually activates (never at /prepare time, since the user might
+// abandon checkout without paying).
+async function redeemDiscountIfApplicable(sub) {
+  if (!sub.discountCode) return;
+  try {
+    if (sub.discountSource === 'admin') {
+      await DiscountCode.updateOne({ code: sub.discountCode }, { $inc: { usedCount: 1 } });
+    } else if (sub.discountSource === 'spin') {
+      await User.updateOne(
+        { _id: sub.userId, 'discounts.code': sub.discountCode },
+        { $set: { 'discounts.$.used': true } }
+      );
+    }
+  } catch (err) {
+    console.error('[payments] discount redemption error:', err.message);
   }
 }
 
@@ -97,6 +145,7 @@ async function verifyAndActivate(reference, userId) {
 
   console.log(`[payments] activated ${sub.planName} for user ${userId} until ${sub.expiresAt.toISOString()}`);
   await convertReferralIfPending(userId, sub._id);
+  await redeemDiscountIfApplicable(sub);
   return { subscription: sub, alreadyActive: false };
 }
 
@@ -201,7 +250,7 @@ router.get('/my-features', auth, async (req, res) => {
 // can open PaystackPop directly without a server-side Paystack API call.
 router.post('/prepare', auth, async (req, res) => {
   try {
-    const { plan } = req.body;
+    const { plan, discountCode } = req.body;
     const planConfig = plan && await getPackageByKey(plan);
     if (!planConfig || !planConfig.active)
       return res.status(400).json({ error: `Unknown plan: ${plan}` });
@@ -209,29 +258,56 @@ router.post('/prepare', auth, async (req, res) => {
     const user = await User.findById(req.user.userId).lean();
     if (!user) return res.status(404).json({ error: 'User not found.' });
 
+    let finalAmount = planConfig.amount;
+    let discount = null;
+    if (discountCode) {
+      discount = await resolveDiscount(discountCode, req.user.userId, plan);
+      if (discount.error) return res.status(400).json({ error: discount.error });
+      finalAmount = Math.max(0, Math.round(planConfig.amount * (1 - discount.percentOff / 100)));
+    }
+
     const reference  = `SIDIS_${plan}_${req.user.userId}_${Date.now()}`;
 
     await Subscription.create({
       userId:            req.user.userId,
       plan,
       planName:          planConfig.name,
-      amount:            planConfig.amount,
+      amount:            finalAmount,
       status:            'pending',
       paystackReference: reference,
       isGroup:           planConfig.isGroup,
+      discountCode:      discount ? discount.code : null,
+      discountPercent:   discount ? discount.percentOff : 0,
+      discountSource:    discount ? discount.source : null,
+      originalAmount:    discount ? planConfig.amount : null,
     });
 
     res.json({
       success:   true,
       reference,
       email:     user.email,
-      amount:    planConfig.amount,
-      amountNGN: planConfig.amount / 100,
+      amount:    finalAmount,
+      amountNGN: finalAmount / 100,
+      originalAmountNGN: discount ? planConfig.amount / 100 : null,
+      discountPercent: discount ? discount.percentOff : 0,
       planName:  planConfig.name,
       plan,
     });
   } catch (err) {
     console.error('[payments] prepare error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/payments/validate-discount ───────────────────────────────────────
+// Lets the frontend preview a code's discount before committing to checkout.
+router.get('/validate-discount', auth, async (req, res) => {
+  try {
+    const { code, plan } = req.query;
+    const discount = await resolveDiscount(code, req.user.userId, plan);
+    if (discount.error) return res.status(400).json({ error: discount.error });
+    res.json({ success: true, percentOff: discount.percentOff });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -261,13 +337,21 @@ router.post('/initialize', auth, async (req, res) => {
     if (!PAYSTACK_SECRET)
       return res.status(503).json({ error: 'Payment service not configured — PAYSTACK_SECRET_KEY missing.' });
 
-    const { plan, callbackUrl } = req.body;
+    const { plan, callbackUrl, discountCode } = req.body;
     const planConfig = plan && await getPackageByKey(plan);
     if (!planConfig || !planConfig.active)
       return res.status(400).json({ error: `Unknown plan: ${plan}` });
 
     const user = await User.findById(req.user.userId).lean();
     if (!user) return res.status(404).json({ error: 'User not found.' });
+
+    let finalAmount = planConfig.amount;
+    let discount = null;
+    if (discountCode) {
+      discount = await resolveDiscount(discountCode, req.user.userId, plan);
+      if (discount.error) return res.status(400).json({ error: discount.error });
+      finalAmount = Math.max(0, Math.round(planConfig.amount * (1 - discount.percentOff / 100)));
+    }
 
     const reference  = `SIDIS_${plan}_${req.user.userId}_${Date.now()}`;
 
@@ -276,7 +360,7 @@ router.post('/initialize', auth, async (req, res) => {
       `${PAYSTACK_BASE}/transaction/initialize`,
       {
         email:        user.email,
-        amount:       planConfig.amount,
+        amount:       finalAmount,
         currency:     'NGN',
         reference,
         callback_url: callbackUrl || `${req.headers.origin}/payment/callback`,
@@ -301,18 +385,22 @@ router.post('/initialize', auth, async (req, res) => {
       userId:            req.user.userId,
       plan,
       planName:          planConfig.name,
-      amount:            planConfig.amount,
+      amount:            finalAmount,
       status:            'pending',
       paystackReference: reference,
       isGroup:           planConfig.isGroup,
+      discountCode:      discount ? discount.code : null,
+      discountPercent:   discount ? discount.percentOff : 0,
+      discountSource:    discount ? discount.source : null,
+      originalAmount:    discount ? planConfig.amount : null,
     });
 
     res.json({
       success:           true,
       authorization_url: psRes.data.data.authorization_url,
       reference,
-      amount:            planConfig.amount,
-      amountNGN:         planConfig.amount / 100,
+      amount:            finalAmount,
+      amountNGN:         finalAmount / 100,
       planName:          planConfig.name,
     });
 
@@ -366,6 +454,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
             await sub.save();
             console.log(`[payments] webhook activated ${sub.planName} for user ${sub.userId}`);
             await convertReferralIfPending(sub.userId, sub._id);
+            await redeemDiscountIfApplicable(sub);
           }
         }
       }
