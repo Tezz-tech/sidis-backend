@@ -6,6 +6,7 @@ const Quiz = require("../models/Quiz");
 const QuizResult = require("../models/QuizResult");
 const { extractPdfText: extractPdfTextShared, pdfParseAvailable } = require("../utils/pdfExtract");
 const { resolveUploadedFiles } = require("../utils/blobFetch");
+const { extractUrlText } = require("../utils/urlExtract");
 const mammoth = require("mammoth");
 require("dotenv").config();
 
@@ -254,40 +255,10 @@ Return ONLY valid JSON: { "transcript": "..." }`;
     }
     // ---- Source: URL ----
     else if (source === "url") {
-      const targetUrl = (req.body.url || "").trim();
-      if (!targetUrl.match(/^https?:\/\/.+/)) {
-        return res.status(400).json({ error: "Please provide a valid URL starting with http:// or https://" });
-      }
       try {
-        const axios = require("axios");
-        const response = await axios.get(targetUrl, {
-          timeout: 15000,
-          headers: { "User-Agent": "Mozilla/5.0 (compatible; Sidis/1.0; +https://sidis.app)" },
-          maxContentLength: 5 * 1024 * 1024,
-          responseType: "text",
-        });
-        let html = response.data || "";
-        // Strip scripts, styles, and their contents first
-        html = html.replace(/<script[\s\S]*?<\/script>/gi, " ");
-        html = html.replace(/<style[\s\S]*?<\/style>/gi, " ");
-        // Strip all remaining HTML tags
-        html = html.replace(/<[^>]+>/g, " ");
-        // Decode common HTML entities
-        html = html
-          .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
-          .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-          .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-          .replace(/&[a-z]+;/gi, " ");
-        extractedText = html.replace(/\s+/g, " ").trim();
-        if (extractedText.length < 200) {
-          return res.status(400).json({ error: "Not enough readable text found at this URL. Try a different page or paste the text directly." });
-        }
+        extractedText = await extractUrlText(req.body.url);
       } catch (urlErr) {
-        const msg = urlErr.code === "ECONNREFUSED" ? "Could not connect to the URL — check it is publicly accessible"
-                  : urlErr.code === "ETIMEDOUT"    ? "URL request timed out — try again or use a faster page"
-                  : urlErr.response               ? `URL returned status ${urlErr.response.status} — the page may be blocked`
-                  : "Failed to fetch URL: " + (urlErr.message || "Unknown error");
-        return res.status(400).json({ error: msg });
+        return res.status(400).json({ error: urlErr.message });
       }
     }
     // ---- Source: single pdf/text (legacy) ----

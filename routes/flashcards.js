@@ -6,6 +6,7 @@ const FlashcardSet = require("../models/FlashcardSet");
 const FlashcardProgress = require("../models/FlashcardProgress");
 const { extractPdfText, pdfParseAvailable } = require("../utils/pdfExtract");
 const { resolveUploadedFiles } = require("../utils/blobFetch");
+const { extractUrlText } = require("../utils/urlExtract");
 require("dotenv").config();
 
 const { gemini, capText } = require("../utils/ai");
@@ -15,7 +16,7 @@ router.post("/generate-flashcards", auth, async (req, res) => {
   if (!gemini.ready) return res.status(503).json({ error: "AI service is temporarily unavailable. Please try again shortly." });
 
   try {
-    const { title, subject, content } = req.body;
+    const { title, subject, content, url } = req.body;
     // 'vision' sends the raw PDF straight to Gemini so diagrams/charts/images
     // are actually read, not just whatever text pdf-parse could pull out.
     const extractionMode = req.body?.extractionMode === "vision" ? "vision" : "text";
@@ -31,11 +32,19 @@ router.post("/generate-flashcards", auth, async (req, res) => {
     let extractedText = "";
     let useVision = false;
 
-    // 1. PASTED TEXT (priority)
-    if (content && typeof content === "string" && content.trim().length > 100) {
+    // 1. URL (priority — explicit source over a vaguer pasted-text fallback)
+    if (url && typeof url === "string" && url.trim()) {
+      try {
+        extractedText = await extractUrlText(url);
+      } catch (urlErr) {
+        return res.status(400).json({ error: urlErr.message });
+      }
+    }
+    // 2. PASTED TEXT
+    else if (content && typeof content === "string" && content.trim().length > 100) {
       extractedText = content.trim();
     }
-    // 2. PDF UPLOAD
+    // 3. PDF UPLOAD
     else if (pdfFile) {
       if (pdfFile.mimetype !== "application/pdf") {
         return res.status(400).json({ error: "Only PDF files are allowed" });
@@ -56,7 +65,7 @@ router.post("/generate-flashcards", auth, async (req, res) => {
         }
       }
     } else {
-      return res.status(400).json({ error: "Please provide either pasted text or upload a PDF" });
+      return res.status(400).json({ error: "Please provide pasted text, a URL, or upload a PDF" });
     }
 
     if (!useVision && !extractedText.trim()) {
