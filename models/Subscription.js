@@ -34,7 +34,13 @@ const subscriptionSchema = new mongoose.Schema({
   // sibling, redeemDiscountIfPending, in routes/payments.js).
   discountCode:         { type: String, default: null },
   discountPercent:      { type: Number, default: 0 },
-  discountSource:       { type: String, enum: ['admin', 'spin', null], default: null },
+  // 'admin' — a fresh, never-personally-redeemed admin code typed directly
+  // at checkout (consumes DiscountCode.usedCount). 'personal' — anything
+  // already sitting in the user's own wallet (spin-wheel win, streak
+  // reward, or an admin code they redeemed ahead of time via
+  // POST /payments/redeem-code) — consumes that User.discounts entry
+  // instead, never DiscountCode.usedCount again.
+  discountSource:       { type: String, enum: ['admin', 'personal', null], default: null },
   originalAmount:       { type: Number, default: null }, // pre-discount price, kobo
 }, { timestamps: true });
 

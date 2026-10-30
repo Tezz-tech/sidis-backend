@@ -4,6 +4,14 @@
 // model (rather than extending CatchUpSession) because the per-section
 // progression/quiz-or-flashcard-per-section loop is a different shape from
 // Catch-Up's single end-of-material quiz-or-flashcard choice.
+//
+// Each section's flow follows the learn -> understand -> recall -> practice
+// -> review cycle: `read` is Learn, the section chat (routes/tutor.js) is
+// Understand, `recallDone`/`lastRecallAttempt` is Recall (closed-book free
+// retrieval, checked against the explanation), quizId/flashcardSetId is
+// Practice, and reviewStage/reviewDueAt is Review — a light, fixed-interval
+// spaced-repetition schedule (due tomorrow, then in 3 days, then in 7) that
+// starts once a section is first marked read.
 const mongoose = require('mongoose');
 
 const SectionSchema = new mongoose.Schema({
@@ -12,6 +20,17 @@ const SectionSchema = new mongoose.Schema({
   read:           { type: Boolean, default: false },
   quizId:         { type: mongoose.Schema.Types.ObjectId, ref: 'Quiz', default: null },
   flashcardSetId: { type: mongoose.Schema.Types.ObjectId, ref: 'FlashcardSet', default: null },
+  // Recall — a closed-book "write what you remember" check, distinct from
+  // the open-book Understand chat. Never required to advance, just tracked
+  // so the stage tracker can show it's been done.
+  recallDone:        { type: Boolean, default: false },
+  lastRecallAttempt: { type: String, default: '' },
+  // Review — reviewStage 0 = never reviewed, 1/2/3 = completed that many
+  // spaced review passes (capped at 3, matching "later that day / next day
+  // / a few days later / the following week"). reviewDueAt is null once
+  // there's nothing currently due.
+  reviewStage: { type: Number, default: 0, min: 0, max: 3 },
+  reviewDueAt: { type: Date, default: null },
 }, { _id: false });
 
 const ReadinessSchema = new mongoose.Schema({

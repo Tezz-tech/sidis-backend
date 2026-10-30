@@ -813,23 +813,29 @@ router.get("/discount-codes", async (req, res) => {
 
 router.post("/discount-codes", async (req, res) => {
   try {
-    const { code, percentOff, active, maxUses, expiresAt, planKey, note } = req.body || {};
+    const { code, type, percentOff, freeDays, active, maxUses, expiresAt, planKey, note } = req.body || {};
     const normalized = (code || '').trim().toUpperCase();
+    const codeType = type === 'freeAccess' ? 'freeAccess' : 'percent';
     if (!/^[A-Z0-9_-]{3,30}$/.test(normalized))
       return res.status(400).json({ error: "Code must be 3-30 characters: letters, numbers, underscore, or hyphen." });
-    if (typeof percentOff !== 'number' || percentOff < 1 || percentOff > 100)
+    if (codeType === 'percent' && (typeof percentOff !== 'number' || percentOff < 1 || percentOff > 100))
       return res.status(400).json({ error: "Percent off must be between 1 and 100." });
+    if (codeType === 'freeAccess' && (typeof freeDays !== 'number' || freeDays < 1))
+      return res.status(400).json({ error: "Free days must be at least 1." });
 
     const existing = await DiscountCode.findOne({ code: normalized });
     if (existing) return res.status(409).json({ error: `A discount code "${normalized}" already exists.` });
 
     const created = await DiscountCode.create({
       code: normalized,
-      percentOff,
+      type: codeType,
+      percentOff: codeType === 'percent' ? percentOff : null,
+      freeDays: codeType === 'freeAccess' ? freeDays : null,
       active: active !== false,
       maxUses: (typeof maxUses === 'number' && maxUses > 0) ? maxUses : null,
       expiresAt: expiresAt ? new Date(expiresAt) : null,
-      planKey: planKey || null,
+      // A freeAccess code isn't tied to any one plan — it grants raw access time.
+      planKey: codeType === 'percent' ? (planKey || null) : null,
       note: note || '',
     });
     res.status(201).json({ success: true, discountCode: created });
@@ -844,16 +850,24 @@ router.patch("/discount-codes/:id", async (req, res) => {
     const dc = await DiscountCode.findById(req.params.id);
     if (!dc) return res.status(404).json({ error: "Discount code not found" });
 
-    const { percentOff, active, maxUses, expiresAt, planKey, note } = req.body || {};
-    if (percentOff !== undefined) {
+    const { percentOff, freeDays, active, maxUses, expiresAt, planKey, note } = req.body || {};
+    // type is intentionally not editable after creation — changing it would
+    // leave the other field (percentOff/freeDays) stale or null for a code
+    // that may already be in use.
+    if (percentOff !== undefined && dc.type === 'percent') {
       if (typeof percentOff !== 'number' || percentOff < 1 || percentOff > 100)
         return res.status(400).json({ error: "Percent off must be between 1 and 100." });
       dc.percentOff = percentOff;
     }
+    if (freeDays !== undefined && dc.type === 'freeAccess') {
+      if (typeof freeDays !== 'number' || freeDays < 1)
+        return res.status(400).json({ error: "Free days must be at least 1." });
+      dc.freeDays = freeDays;
+    }
     if (active !== undefined) dc.active = !!active;
     if (maxUses !== undefined) dc.maxUses = (typeof maxUses === 'number' && maxUses > 0) ? maxUses : null;
     if (expiresAt !== undefined) dc.expiresAt = expiresAt ? new Date(expiresAt) : null;
-    if (planKey !== undefined) dc.planKey = planKey || null;
+    if (planKey !== undefined && dc.type === 'percent') dc.planKey = planKey || null;
     if (note !== undefined) dc.note = note;
 
     await dc.save();

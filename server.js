@@ -44,6 +44,8 @@ let referralRoutes = null;
 try { referralRoutes = require('./routes/referrals'); console.log('referral routes: loaded'); } catch (e) { console.error('referral load error:', e.message, e.stack); }
 let tutorRoutes = null;
 try { tutorRoutes = require('./routes/tutor'); console.log('tutor routes: loaded'); } catch (e) { console.error('tutor load error:', e.message, e.stack); }
+let mausbotRoutes = null;
+try { mausbotRoutes = require('./routes/mausbot'); console.log('mausbot routes: loaded'); } catch (e) { console.error('mausbot load error:', e.message, e.stack); }
 const fileUpload = require('express-fileupload');
 const cors = require('cors');
 
@@ -184,6 +186,7 @@ if (blobRoutes)          app.use('/api/blob',          blobRoutes);
 if (pushRoutes)          app.use('/api/push',          pushRoutes);
 if (referralRoutes)      app.use('/api/referrals',     referralRoutes);
 if (tutorRoutes)         app.use('/api/tutor',         tutorRoutes);
+if (mausbotRoutes)       app.use('/api/mausbot',       mausbotRoutes);
 
 // -------------------------------------------------
 // 5. JSON 404 for any unmatched route (so CORS headers are always present)

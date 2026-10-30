@@ -10,7 +10,7 @@ const StudyPlan = require('../models/StudyPlan');
 const ActivityLog = require('../models/ActivityLog');
 const Subscription = require('../models/Subscription');
 const Package = require('../models/Package');
-const { getUserPlan, getPlanFeatures, getPlanName, getFeatureRequiredPlanMap } = require('../utils/subscription');
+const { getUserPlan, getPlanFeatures, getPlanName, getFeatureRequiredPlanMap, grantBonusAccessDays } = require('../utils/subscription');
 
 // Feature keys worth pitching mid-conversation when a student hits one —
 // matches the upgrade-prompt flags in Package.access (see models/Package.js).
@@ -589,14 +589,22 @@ Return JSON: { "title": "short title", "body": "message body" }`;
 });
 
 // ─── POST /api/gamification/spin-discount ─────────────────────────────────────
-const SPIN_COST = 50; // XP per spin
+const SPIN_COST = 100; // XP per spin
+// Mixed prize pool: 'percent' prizes work exactly as before (banked onto
+// User.discounts, applied at next checkout). 'freeAccess' prizes grant raw
+// access time immediately via grantBonusAccessDays instead of a code to redeem.
 const DISCOUNT_WHEEL = [
-  { label: '5% Off',  value: 5,  rarity: 'common',    weight: 35, emoji: '🎁' },
-  { label: '10% Off', value: 10, rarity: 'uncommon',  weight: 28, emoji: '🎀' },
-  { label: '15% Off', value: 15, rarity: 'rare',      weight: 20, emoji: '🎊' },
-  { label: '20% Off', value: 20, rarity: 'epic',      weight: 12, emoji: '⭐' },
-  { label: '25% Off', value: 25, rarity: 'legendary', weight: 4,  emoji: '💫' },
-  { label: '50% Off', value: 50, rarity: 'mythic',    weight: 1,  emoji: '🌟' },
+  { type: 'percent',    label: '5% Off',       value: 5,  rarity: 'common',    weight: 24, emoji: '🎁' },
+  { type: 'percent',    label: '10% Off',      value: 10, rarity: 'uncommon',  weight: 18, emoji: '🎀' },
+  { type: 'percent',    label: '15% Off',      value: 15, rarity: 'rare',      weight: 12, emoji: '🎊' },
+  { type: 'percent',    label: '20% Off',      value: 20, rarity: 'epic',      weight: 7,  emoji: '⭐' },
+  { type: 'percent',    label: '25% Off',      value: 25, rarity: 'legendary', weight: 3,  emoji: '💫' },
+  { type: 'percent',    label: '50% Off',      value: 50, rarity: 'mythic',    weight: 1,  emoji: '🌟' },
+  { type: 'freeAccess', label: '2 Days Free',  days: 2,   rarity: 'common',    weight: 16, emoji: '🕑' },
+  { type: 'freeAccess', label: '5 Days Free',  days: 5,   rarity: 'uncommon',  weight: 10, emoji: '📅' },
+  { type: 'freeAccess', label: '1 Week Free',  days: 7,   rarity: 'rare',      weight: 6,  emoji: '🗓️' },
+  { type: 'freeAccess', label: '2 Weeks Free', days: 14,  rarity: 'epic',      weight: 2,  emoji: '🎉' },
+  { type: 'freeAccess', label: '1 Month Free', days: 30,  rarity: 'legendary', weight: 1,  emoji: '👑' },
 ];
 
 function spinWheel() {
@@ -617,17 +625,32 @@ router.post('/spin-discount', auth, async (req, res) => {
     if ((user.xp || 0) < SPIN_COST)
       return res.status(400).json({ error: `Need ${SPIN_COST} XP to spin. You have ${user.xp || 0} XP.` });
 
-    const prize = spinWheel();
+    const slot = spinWheel();
+
+    if (slot.type === 'freeAccess') {
+      const { appliedImmediately, expiresAt } = await grantBonusAccessDays(req.user.userId, slot.days, {
+        plan: 'promo_pass', planName: `${slot.label} (Spin Wheel)`,
+      });
+      await User.updateOne({ _id: req.user.userId }, { $inc: { xp: -SPIN_COST, spinCount: 1 } });
+
+      return res.json({
+        success:     true,
+        prize:       { type: 'freeAccess', label: slot.label, rarity: slot.rarity, emoji: slot.emoji, days: slot.days, appliedImmediately, expiresAt },
+        xpRemaining: (user.xp || 0) - SPIN_COST,
+        spinCount:   (user.spinCount || 0) + 1,
+      });
+    }
+
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 30); // 30-day validity
 
     const newDiscount = {
       id:        `disc_${Date.now()}`,
-      label:     prize.label,
-      value:     prize.value,
-      rarity:    prize.rarity,
-      emoji:     prize.emoji,
-      code:      `SIDIS${prize.value}OFF${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+      label:     slot.label,
+      value:     slot.value,
+      rarity:    slot.rarity,
+      emoji:     slot.emoji,
+      code:      `SIDIS${slot.value}OFF${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
       expiresAt: expiresAt.toISOString(),
       used:      false,
     };
@@ -644,7 +667,7 @@ router.post('/spin-discount', auth, async (req, res) => {
 
     res.json({
       success:     true,
-      prize:       newDiscount,
+      prize:       { type: 'percent', ...newDiscount },
       xpRemaining: (user.xp || 0) - SPIN_COST,
       spinCount:   (user.spinCount || 0) + 1,
     });
@@ -887,22 +910,13 @@ Return JSON: { "reply": "...", "suggestedRoute": "/exact-route-from-list-or-null
 // paid feature) — implemented as a short-lived Subscription so it rides on
 // the exact same access-gating path (getEffectiveSubscription/getPlanFeatures)
 // every real paid plan uses, rather than a parallel "unlock" system.
+// Granting goes through grantBonusAccessDays, which extends the student's
+// own active subscription instead of starting a wastefully-concurrent one if
+// they're already on a paid plan.
 const XP_PASS_OPTIONS = {
-  day:  { hours: 24,  cost: 120, label: '24-Hour Full Access Pass' },
-  week: { hours: 168, cost: 500, label: '7-Day Full Access Pass'  },
+  day:  { days: 1, cost: 120, label: '24-Hour Full Access Pass' },
+  week: { days: 7, cost: 500, label: '7-Day Full Access Pass'  },
 };
-
-async function ensureXPPassPackage() {
-  await Package.findOneAndUpdate(
-    { key: 'xp_pass' },
-    { $setOnInsert: {
-        key: 'xp_pass', name: 'XP Pass', amount: 0, durationDays: 0,
-        active: false, popular: false, badge: '', sortOrder: 999,
-        displayFeatures: ['Temporary full access, redeemed with XP'],
-      } },
-    { upsert: true }
-  );
-}
 
 router.post('/redeem-xp', auth, async (req, res) => {
   try {
@@ -915,19 +929,8 @@ router.post('/redeem-xp', auth, async (req, res) => {
     if ((user.xp || 0) < choice.cost)
       return res.status(400).json({ error: `Need ${choice.cost} XP for the ${choice.label}. You have ${user.xp || 0} XP.` });
 
-    await ensureXPPassPackage();
-
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + choice.hours * 60 * 60 * 1000);
-
-    await Subscription.create({
-      userId: req.user.userId,
-      plan: 'xp_pass',
-      planName: choice.label,
-      amount: 0,
-      status: 'active',
-      startDate: now,
-      expiresAt,
+    const { appliedImmediately, expiresAt } = await grantBonusAccessDays(req.user.userId, choice.days, {
+      plan: 'xp_pass', planName: choice.label,
     });
 
     await User.updateOne({ _id: req.user.userId }, { $inc: { xp: -choice.cost } });
@@ -935,6 +938,7 @@ router.post('/redeem-xp', auth, async (req, res) => {
     res.json({
       success:     true,
       label:       choice.label,
+      appliedImmediately,
       expiresAt,
       xpRemaining: (user.xp || 0) - choice.cost,
     });

@@ -9,7 +9,7 @@ const User         = require('../models/User');
 const Quiz         = require('../models/Quiz');
 const Referral     = require('../models/Referral');
 const DiscountCode = require('../models/DiscountCode');
-const { getPlanFeatures, getPlanName, getEffectiveSubscription, getPackageByKey, getAllActivePackages } = require('../utils/subscription');
+const { getPlanFeatures, getPlanName, getEffectiveSubscription, getPackageByKey, getAllActivePackages, grantBonusAccessDays } = require('../utils/subscription');
 const MAX_GROUP_MEMBERS = 2;
 
 const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
@@ -32,15 +32,22 @@ async function convertReferralIfPending(userId, subscriptionId) {
 }
 
 // Checks a discount code against BOTH sources: admin-created global codes
-// (DiscountCode collection) and the user's own spin-wheel winnings
-// (User.discounts) — checked in that order since an admin code is never
-// tied to one user. Returns { percentOff, source, code } or { error }.
+// (DiscountCode collection) and the user's own wallet (User.discounts —
+// spin-wheel winnings, streak rewards, or an admin code already redeemed
+// ahead of time via POST /payments/redeem-code). An admin code this user has
+// already personally redeemed is skipped here on purpose (falls through to
+// their wallet instead) so it can never be consumed from the global pool
+// twice for the same person. Returns { percentOff, source, code } or { error }.
 async function resolveDiscount(code, userId, planKey) {
   const normalized = (code || '').trim().toUpperCase();
   if (!normalized) return { error: 'Enter a discount code.' };
 
   const adminCode = await DiscountCode.findOne({ code: normalized });
-  if (adminCode) {
+  const alreadyRedeemedByThisUser = !!adminCode?.redeemedBy?.some((id) => id.toString() === String(userId));
+
+  if (adminCode && !alreadyRedeemedByThisUser) {
+    if (adminCode.type === 'freeAccess')
+      return { error: 'This code grants free access time, not a checkout discount — redeem it from the Discount Randomizer page instead.' };
     if (!adminCode.active) return { error: 'This discount code is no longer active.' };
     if (adminCode.expiresAt && adminCode.expiresAt < new Date()) return { error: 'This discount code has expired.' };
     if (adminCode.maxUses !== null && adminCode.usedCount >= adminCode.maxUses) return { error: 'This discount code has reached its usage limit.' };
@@ -53,7 +60,7 @@ async function resolveDiscount(code, userId, planKey) {
   if (own) {
     if (own.used) return { error: 'This discount code has already been used.' };
     if (new Date(own.expiresAt) < new Date()) return { error: 'This discount code has expired.' };
-    return { percentOff: own.value, source: 'spin', code: normalized };
+    return { percentOff: own.value, source: 'personal', code: normalized };
   }
 
   return { error: 'Invalid discount code.' };
@@ -67,7 +74,7 @@ async function redeemDiscountIfApplicable(sub) {
   try {
     if (sub.discountSource === 'admin') {
       await DiscountCode.updateOne({ code: sub.discountCode }, { $inc: { usedCount: 1 } });
-    } else if (sub.discountSource === 'spin') {
+    } else if (sub.discountSource === 'personal') {
       await User.updateOne(
         { _id: sub.userId, 'discounts.code': sub.discountCode },
         { $set: { 'discounts.$.used': true } }
@@ -309,6 +316,82 @@ router.get('/validate-discount', auth, async (req, res) => {
     res.json({ success: true, percentOff: discount.percentOff });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/payments/best-discount ───────────────────────────────────────────
+// The best (highest %) unused, unexpired discount already sitting in this
+// user's own wallet, for a given plan — lets checkout auto-apply it instead
+// of making the student retype a code they've already redeemed/won.
+router.get('/best-discount', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).select('discounts').lean();
+    const now = new Date();
+    const usable = (Array.isArray(user?.discounts) ? user.discounts : [])
+      .filter(d => !d.used && new Date(d.expiresAt) > now)
+      .sort((a, b) => b.value - a.value);
+    if (usable.length === 0) return res.json({ success: true, discount: null });
+    res.json({ success: true, discount: { code: usable[0].code, percentOff: usable[0].value } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/payments/redeem-code ────────────────────────────────────────────
+// Lets a student paste an admin-created code and activate it right away,
+// instead of only being able to type it at checkout. A 'percent' code is
+// banked into the student's own wallet (same shape as a spin-wheel win) so
+// it auto-applies at their next payment; a 'freeAccess' code grants the free
+// days immediately (queued after their current plan if they're already paid
+// — see grantBonusAccessDays).
+router.post('/redeem-code', auth, async (req, res) => {
+  try {
+    const normalized = (req.body?.code || '').trim().toUpperCase();
+    if (!normalized) return res.status(400).json({ error: 'Enter a code.' });
+
+    const dc = await DiscountCode.findOne({ code: normalized });
+    if (!dc) return res.status(404).json({ error: 'Invalid code.' });
+    if (!dc.active) return res.status(400).json({ error: 'This code is no longer active.' });
+    if (dc.expiresAt && dc.expiresAt < new Date()) return res.status(400).json({ error: 'This code has expired.' });
+    if (dc.maxUses !== null && dc.usedCount >= dc.maxUses) return res.status(400).json({ error: 'This code has reached its usage limit.' });
+    if (dc.redeemedBy.some((id) => id.toString() === String(req.user.userId)))
+      return res.status(400).json({ error: "You've already redeemed this code." });
+
+    if (dc.type === 'freeAccess') {
+      const { appliedImmediately, expiresAt } = await grantBonusAccessDays(req.user.userId, dc.freeDays, {
+        plan: 'promo_pass', planName: `${dc.freeDays}-Day Free Access (${normalized})`,
+      });
+      dc.usedCount += 1;
+      dc.redeemedBy.push(req.user.userId);
+      await dc.save();
+      return res.json({ success: true, type: 'freeAccess', days: dc.freeDays, appliedImmediately, expiresAt });
+    }
+
+    const expiresAt = dc.expiresAt || new Date(Date.now() + 90 * 86400000);
+    const newDiscount = {
+      id:        `disc_${Date.now()}`,
+      label:     `${dc.percentOff}% Off`,
+      value:     dc.percentOff,
+      rarity:    'common',
+      emoji:     '🎁',
+      code:      normalized,
+      expiresAt: new Date(expiresAt).toISOString(),
+      used:      false,
+      source:    'admin',
+    };
+    const user = await User.findById(req.user.userId).select('discounts');
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    const currentDiscounts = Array.isArray(user.discounts) ? user.discounts : [];
+    await User.updateOne({ _id: req.user.userId }, { $set: { discounts: [...currentDiscounts, newDiscount] } });
+
+    dc.usedCount += 1;
+    dc.redeemedBy.push(req.user.userId);
+    await dc.save();
+
+    res.json({ success: true, type: 'percent', percentOff: dc.percentOff, discount: newDiscount });
+  } catch (err) {
+    console.error('[payments] redeem-code error:', err.message);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

@@ -232,6 +232,86 @@ class AIClient {
   async generateText(prompt, opts = {}) {
     return this._call(prompt, { ...opts, jsonMode: false });
   }
+
+  // ── Public: generate text grounded in real Google Search results ───────────
+  // Used by Mausbot's chapter research/writing so citations point at real
+  // sources instead of the model's own (possibly fabricated-sounding)
+  // recollection. Returns { text, sources, grounded } — `sources` is a plain
+  // [{ title, url }] list pulled from the response's own grounding metadata
+  // (never asked of the model as JSON, since forcing JSON output and tool
+  // use aren't reliably combinable), and `grounded` is false whenever no
+  // (key, model) combination could ground the response — callers should
+  // always check it and warn the reader rather than assume every chapter
+  // actually has verified sources. Deliberately never throws: a grounding
+  // failure degrades to a plain ungrounded generateText call so a research
+  // feature can never hard-fail just because grounding isn't available for
+  // this key/model/region, it just loses its citation guarantee.
+  async generateGroundedText(prompt, opts = {}) {
+    try {
+      return await this._callGrounded(prompt, opts);
+    } catch (err) {
+      console.warn('[AI] Grounded generation unavailable, falling back to ungrounded:', err.message);
+      const text = await this.generateText(prompt, opts);
+      return { text, sources: [], grounded: false };
+    }
+  }
+
+  // Mirrors _call's (key, model) failover loop, but also tries both known
+  // Google Search tool shapes per combo — "googleSearch" is the current
+  // name, "googleSearchRetrieval" the older one some model generations
+  // still expect — since this SDK/model line hasn't been live-verified
+  // against either yet. Throws if every combination of (key, model, tool
+  // shape) fails; generateGroundedText is what callers should actually use.
+  async _callGrounded(prompt, opts = {}) {
+    if (!this.ready) throw new Error(GENERIC_UNAVAILABLE);
+    const { temperature = 0.6, maxOutputTokens = 8192 } = opts;
+    const TOOL_SHAPES = [{ googleSearch: {} }, { googleSearchRetrieval: {} }];
+
+    const totalCombos = this._keys.length * MODELS.length;
+    let combosTried = 0;
+
+    combos: while (combosTried < totalCombos) {
+      if (!this._genAI) { this._advanceKey(); combosTried += MODELS.length; continue; }
+      const modelName = MODELS[this._modelIdx];
+      const keyLabel = `key ${this._keyIdx + 1}/${this._keys.length}`;
+
+      for (const toolShape of TOOL_SHAPES) {
+        try {
+          const model = this._genAI.getGenerativeModel({
+            model: modelName,
+            tools: [toolShape],
+            generationConfig: { temperature, topK: 40, topP: 0.95, maxOutputTokens },
+          });
+          const result = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }] }] });
+          const response = result.response;
+          const text = (response.text() || '').trim();
+          if (!text) throw new Error('Empty response');
+
+          const metadata = response.candidates?.[0]?.groundingMetadata;
+          const sources = (metadata?.groundingChunks || [])
+            .map(c => ({ title: c.web?.title || c.web?.uri || 'Source', url: c.web?.uri || '' }))
+            .filter(s => s.url);
+
+          return { text, sources, grounded: sources.length > 0 || !!metadata };
+        } catch (err) {
+          if (this._isKeyLevelError(err)) {
+            console.warn(`[AI] [grounded] ${keyLabel} rejected — rotating key. (${err.message})`);
+            this._modelIdx = 0;
+            this._advanceKey();
+            combosTried += MODELS.length;
+            continue combos; // skip straight to the next (now-rotated) key
+          }
+          console.warn(`[AI] [grounded] ${modelName}/${keyLabel} (${toolShape.googleSearch ? 'googleSearch' : 'googleSearchRetrieval'}) failed: ${err.message.slice(0, 150)}`);
+          // try the next tool shape on the same (key, model) before moving on
+        }
+      }
+
+      this._advanceModel();
+      combosTried++;
+    }
+
+    throw new Error('No (key, model) combination supports search grounding right now.');
+  }
 }
 
 // ── Singleton ─────────────────────────────────────────────────────────────────

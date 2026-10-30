@@ -138,33 +138,54 @@ router.post('/create', auth, async (req, res) => {
       return res.status(422).json({ error: 'No usable text found. Please check your file or paste the note directly.' });
 
     // ── AI: split the material into a sequence of teachable sections ──────────
-    const MAX_SECTIONS   = 20;
-    const BATCH_SIZE     = 8;
-    const MAX_BATCHES    = 3; // 3 x 8 = 24, comfortably covers MAX_SECTIONS
+    // No artificial ceiling that would force the AI to compress/summarize a
+    // long document into too few sections — a genuinely long note (a full
+    // chapter, a 40-page lecture deck) should produce as many sections as it
+    // takes to cover EVERY point, even 30-60+. MAX_SECTIONS exists only as a
+    // sane outer bound against a pathological/runaway response, not a target.
+    const MAX_SECTIONS   = 60;
+    const BATCH_SIZE     = 10;
+    const MAX_BATCHES    = 7; // 7 x 10 = 70, comfortably covers MAX_SECTIONS
 
     function buildSectionsPrompt(usingVisionFiles, askFor, coveredHeadings, includeMeta) {
       const materialSection = usingVisionFiles
         ? `The note is attached as a PDF file — read all text AND any diagrams, charts, tables, photos, or images it contains.`
         : `Note content:\n${combinedText}`;
-      return `You are a brilliant, encouraging one-on-one tutor reteaching a student their own notes, like a great private tutor going through material with them from scratch.
+      return `You are a brilliant, encouraging one-on-one tutor reteaching a student their own notes, like a great private tutor going through material with them from scratch, covering it in FULL from start to end — never a shortened or summarized version.
 
 ${materialSection}
 
-TASK: Break this note into an ordered sequence of digestible TEACHING SECTIONS the student will go through one at a time, each one a self-contained mini-lesson that thoroughly reteaches one part of the material — not a glossary entry, a real explanation with an analogy or worked example, as if tutoring someone seeing this for the first time.
-${coveredHeadings.length ? `\nAlready written so far: ${coveredHeadings.join('; ')}. Do NOT repeat these — continue with the NEXT distinct part of the material.` : ''}
+TASK: Break this note into an ordered sequence of digestible TEACHING SECTIONS the student will go through one at a time, covering the ENTIRE document — every page, every topic, start to finish — not just the first few pages or the headline ideas. Each section is a self-contained mini-lesson that thoroughly reteaches ONE distinct point, not a glossary entry: a real explanation with an analogy or worked example, as if tutoring someone seeing this for the first time.
+
+Do NOT compress this into a handful of broad sections. For each topic the material raises, actively scan for and give a SEPARATE section to EVERY dimension the material actually contains, not just "what it is":
+- Definitions — what it IS
+- Types/categories/classifications
+- Causes, reasons, or factors that lead to or influence it
+- Processes/steps — how it happens or how it's done
+- Characteristics/features/properties
+- Examples or case studies mentioned
+- Advantages/disadvantages, pros/cons
+- Comparisons or differences from related concepts
+- Effects, consequences, or implications
+- Exceptions, special conditions, or rules
+A single topic in the material often has SEVERAL of these dimensions covered in the text — each one is its own separate section, not a footnote folded into a bigger one. If the material explains, say, the types AND the causes of something, that is at least two sections, not one. Not every topic has every dimension — only make a section for the ones actually present in the material, but never skip or merge points just to keep the section count low. A long, detailed document SHOULD produce many sections (30, 40, even 60+) — that is correct and expected, not a problem to avoid.
+
+If the material contains ANY calculations, formulas, numeric worked examples, or quantitative problems, give them their own section(s) and explain them in full: show every step of the working, not just the formula or the final answer.
+${coveredHeadings.length ? `\nAlready written so far: ${coveredHeadings.join('; ')}. Do NOT repeat these — continue with the NEXT distinct, uncovered points in the material (keep working further into the document, including later pages/sections — do not restart from the beginning or re-summarize what's already covered).` : ''}
 
 Return ONLY valid JSON (no markdown, no extra text):
 {${includeMeta ? `
   "overview": "2-3 sentence plain-language introduction to what this note covers",` : ''}
   "sections": [
-    { "heading": "Short, specific section title", "explanation": "A genuine, thorough teaching explanation (4-8 sentences) with a vivid analogy or worked example — as if tutoring someone who's never seen this before. If it involves a calculation, show the full step-by-step working." }
+    { "heading": "Specific section title that names WHICH dimension of the topic this covers — e.g. 'Types of X', 'Causes of Y', 'How Z Works', not just 'X'", "explanation": "A genuine, thorough teaching explanation (4-8 sentences, longer if explaining a calculation or listing multiple types/factors — cover each one) with a vivid analogy or worked example — as if tutoring someone who's never seen this before. If it involves a calculation, show the full step-by-step working." }
   ]${includeMeta ? `,
-  "transcript": "A thorough, detailed prose transcript of EVERYTHING in the material, start to end — used later to generate section quizzes/flashcards, so be comprehensive."` : ''}
+  "transcript": "A thorough, detailed prose transcript of EVERYTHING in the material, start to end — all text content plus a full written description of every diagram, chart, table, or image (what it shows, its labels, what it demonstrates), and the COMPLETE working for every calculation shown. Used later to generate section quizzes/flashcards, so be comprehensive and do not cut it short."` : ''}
 }
 
 RULES:
-- Write up to ${askFor} sections — but only if the material genuinely has that many distinct, uncovered parts left. Return fewer rather than pad with filler.
-- If everything has already been covered, return an EMPTY sections array.
+- Write up to ${askFor} sections this batch — but only if the material genuinely still has that many distinct, uncovered points left. Return fewer rather than pad with filler or repeat something already taught.
+- If everything in the material has already been covered in "Already written so far", return an EMPTY sections array — do NOT write a wrap-up/completion section like "summary" or "all topics covered", that is not a real teaching point.
+- Never collapse "what it is" + "its types" + "its causes" + "how it works" into one section just to save space — split them into separate sections the way the material itself separates them.
 - Order sections the way a tutor would actually teach them, building on what came before.`;
     }
 
@@ -240,7 +261,12 @@ router.get('/sessions', auth, async (req, res) => {
   try {
     const sessions = await TutorSession.find({ userId: req.user.userId })
       .select('-combinedText -sections.explanation').sort({ createdAt: -1 }).lean();
-    res.json({ success: true, sessions });
+    const now = new Date();
+    const withDue = sessions.map(s => ({
+      ...s,
+      dueForReviewCount: (s.sections || []).filter(sec => sec.reviewDueAt && new Date(sec.reviewDueAt) <= now).length,
+    }));
+    res.json({ success: true, sessions: withDue });
   } catch (err) {
     res.status(500).json({ error: `Failed to fetch tutor sessions: ${err.message}` });
   }
@@ -268,10 +294,19 @@ router.delete('/:id', auth, async (req, res) => {
   }
 });
 
+// Learn -> Understand -> Recall -> Practice -> Review. The fixed cadence a
+// section's spaced reviews are due on: first review 1 day after Learn, then
+// 3 days after that, then 7 days after that — "later that day/next day /
+// a few days later / the following week". Index 0 is used when a section is
+// first marked read; after completing review N (reviewStage becomes N),
+// REVIEW_INTERVALS_DAYS[N] schedules the next one.
+const REVIEW_INTERVALS_DAYS = [1, 3, 7];
+
 // ── POST /api/tutor/:id/section/:index/complete ─────────────────────────────
-// Marks a section read and advances the pointer. No AI call — purely
-// bookkeeping, called the moment the student finishes reading a section
-// (before they decide whether to take the quiz/flashcard check).
+// Marks a section read (Learn) and advances the pointer, starting its Review
+// clock. No AI call — purely bookkeeping, called the moment the student
+// finishes reading a section (before they decide whether to take the
+// quiz/flashcard check).
 router.post('/:id/section/:index/complete', auth, async (req, res) => {
   try {
     const session = await TutorSession.findOne({ _id: req.params.id, userId: req.user.userId });
@@ -281,7 +316,11 @@ router.post('/:id/section/:index/complete', auth, async (req, res) => {
     if (!Number.isInteger(idx) || idx < 0 || idx >= session.sections.length)
       return res.status(400).json({ error: 'Invalid section index.' });
 
-    session.sections[idx].read = true;
+    const section = session.sections[idx];
+    section.read = true;
+    if (!section.reviewDueAt && section.reviewStage === 0) {
+      section.reviewDueAt = new Date(Date.now() + REVIEW_INTERVALS_DAYS[0] * 86400000);
+    }
     session.currentSectionIndex = Math.max(session.currentSectionIndex, Math.min(idx + 1, session.sections.length - 1));
     const allRead = session.sections.every(s => s.read);
     if (allRead) session.status = 'completed';
@@ -291,9 +330,153 @@ router.post('/:id/section/:index/complete', auth, async (req, res) => {
       success: true,
       allRead,
       nextIndex: idx + 1 < session.sections.length ? idx + 1 : null,
+      reviewDueAt: section.reviewDueAt,
     });
   } catch (err) {
     res.status(500).json({ error: `Failed to update section: ${err.message}` });
+  }
+});
+
+// ── POST /api/tutor/:id/section/:index/recall ───────────────────────────────
+// Recall — the student writes what they remember WITHOUT looking back at the
+// section (closed-book), and the AI checks it against the real content.
+// Distinct from the Understand chat, which happens with the material still
+// on screen. Never required to move on, just tracked for the stage tracker.
+router.post('/:id/section/:index/recall', auth, async (req, res) => {
+  try {
+    if (!gemini.ready)
+      return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
+
+    const attempt = (req.body?.attempt || '').trim();
+    if (!attempt) return res.status(400).json({ error: 'Write what you remember first.' });
+
+    const session = await TutorSession.findOne({ _id: req.params.id, userId: req.user.userId });
+    if (!session) return res.status(404).json({ error: 'Tutor session not found.' });
+
+    const idx = parseInt(req.params.index, 10);
+    const section = session.sections[idx];
+    if (!section) return res.status(400).json({ error: 'Invalid section index.' });
+
+    const prompt = `A student just tried to recall this section from memory, WITHOUT looking at the material — this tests real retention, not recognition ("recognition feels like knowing — recall proves it").
+
+Section: "${section.heading}"
+Actual content: ${section.explanation}
+
+What the student wrote from memory: "${attempt.slice(0, 3000)}"
+
+Give quick, encouraging feedback: what they got right, and specifically what they missed or got wrong, naming the actual point so they can close the gap — don't just say "you missed some details." Keep it short (3-5 sentences).
+
+Return ONLY valid JSON: { "verdict": "strong" | "partial" | "weak", "feedback": "..." }`;
+
+    let parsed;
+    try {
+      parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 500, temperature: 0.5 });
+    } catch (aiErr) {
+      console.error('[tutor] recall AI error:', aiErr.message);
+      return res.status(500).json({ error: 'AI failed to check your recall. Try again.' });
+    }
+    if (!parsed.feedback) return res.status(500).json({ error: 'AI returned an empty response.' });
+
+    section.recallDone = true;
+    section.lastRecallAttempt = attempt.slice(0, 2000);
+    await session.save();
+
+    res.json({ success: true, verdict: parsed.verdict || 'partial', feedback: parsed.feedback });
+  } catch (err) {
+    console.error('[tutor] recall error:', err.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ── POST /api/tutor/:id/section/:index/review-complete ─────────────────────
+// Review — marks one spaced-review pass done for this section and schedules
+// the next one (or clears the due date once the 3-pass cycle is finished).
+router.post('/:id/section/:index/review-complete', auth, async (req, res) => {
+  try {
+    const session = await TutorSession.findOne({ _id: req.params.id, userId: req.user.userId });
+    if (!session) return res.status(404).json({ error: 'Tutor session not found.' });
+
+    const idx = parseInt(req.params.index, 10);
+    const section = session.sections[idx];
+    if (!section) return res.status(400).json({ error: 'Invalid section index.' });
+
+    const nextStage = Math.min(3, (section.reviewStage || 0) + 1);
+    section.reviewStage = nextStage;
+    section.reviewDueAt = nextStage < 3
+      ? new Date(Date.now() + REVIEW_INTERVALS_DAYS[nextStage] * 86400000)
+      : null;
+    await session.save();
+
+    res.json({ success: true, reviewStage: section.reviewStage, reviewDueAt: section.reviewDueAt });
+  } catch (err) {
+    res.status(500).json({ error: `Failed to update review: ${err.message}` });
+  }
+});
+
+// ── POST /api/tutor/:id/section/:index/chat ─────────────────────────────────
+// Conversational comprehension check, grounded in just this one section —
+// same "AI opens with a question, student responds" pattern as Catch-Up and
+// Exam Mode's Q&A phase. Deliberately ephemeral (not persisted server-side,
+// same as those two) — the frontend fires `start` fresh each time a section
+// is opened, so reopening a section later always begins with a new check
+// rather than replaying a stale conversation.
+router.post('/:id/section/:index/chat', auth, async (req, res) => {
+  try {
+    if (!gemini.ready)
+      return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
+
+    const { message, history, start } = req.body;
+    if (!start && (!message || !message.trim())) return res.status(400).json({ error: 'message is required' });
+
+    const session = await TutorSession.findOne({ _id: req.params.id, userId: req.user.userId });
+    if (!session) return res.status(404).json({ error: 'Tutor session not found.' });
+
+    const idx = parseInt(req.params.index, 10);
+    const section = session.sections[idx];
+    if (!section) return res.status(400).json({ error: 'Invalid section index.' });
+
+    const historyText = Array.isArray(history)
+      ? history.slice(-6).map(h => `${h.role === 'user' ? 'Student' : 'Tutor'}: ${h.content}`).join('\n')
+      : '';
+
+    const prompt = start
+      ? `You are a patient, expert tutor turning information into real understanding with a student on ONE section they just read — not testing recall yet, that comes later. The goal right now is Feynman-style: can they explain it simply, in their own words, and do they understand WHY it works?
+
+Subject: ${session.subject}
+Section: "${section.heading}"
+${section.explanation}
+
+This is the very first message — nothing from the student to respond to yet. Open by asking ONE genuinely good question that pushes them to explain this section back in their own words or explain WHY it works, not just recite it (not trivial recall — something that checks real understanding). You may add one short, warm sentence before it, but get to the question quickly.
+
+Return ONLY valid JSON: { "reply": "..." }`
+      : `You are a patient, expert tutor helping a student understand ONE section of their notes.
+
+Subject: ${session.subject}
+Section: "${section.heading}"
+${section.explanation}
+${historyText ? `\nConversation so far:\n${historyText}\n` : ''}
+Student's new message: "${message.trim()}"
+
+Respond to their message, drawing only on this section — answer if they asked something, correct them gently if they misunderstood, give feedback if they just answered a question of yours — THEN ask another question yourself so they always have something of yours to answer rather than being left to think of their own. If a calculation is involved, show the full step-by-step working, not just the final answer. No markdown headers.
+
+Match your length to the question: a quick/direct question gets a short, direct answer (1-3 sentences) plus your next question — don't pad it out. When they ask for an explanation, say "explain", "why", "I don't get it", or ask something genuinely conceptual, go as deep and thorough as the topic needs, but still follow it with your next question once you're done.
+
+Return ONLY valid JSON: { "reply": "..." }`;
+
+    let reply;
+    try {
+      const parsed = await gemini.generateJSON(prompt, { maxOutputTokens: 1200, temperature: 0.7 });
+      reply = parsed.reply;
+    } catch (aiErr) {
+      console.error('[tutor] section chat AI error:', aiErr.message);
+      return res.status(500).json({ error: 'AI failed to respond. Try again.' });
+    }
+    if (!reply) return res.status(500).json({ error: 'AI returned an empty response.' });
+
+    res.json({ success: true, reply });
+  } catch (err) {
+    console.error('[tutor] section chat error:', err.message);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

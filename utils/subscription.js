@@ -146,9 +146,50 @@ async function getUserPlan(userId) {
   return subscription ? subscription.plan : 'free';
 }
 
+/**
+ * Grants `days` of full paid access — used by XP-for-a-pass redemption, the
+ * spin wheel's free-access prize, and admin-created freeAccess discount
+ * codes. If the user already has their OWN active paid subscription (never
+ * a group plan they merely joined — that's not theirs to extend), the days
+ * extend its expiry, so the bonus is queued to start right where the
+ * current plan would otherwise end rather than wastefully running
+ * concurrently with access they already have. If they're on the free tier,
+ * a new pass starts immediately. Returns { appliedImmediately, expiresAt }.
+ */
+async function grantBonusAccessDays(userId, days, { plan = 'promo_pass', planName } = {}) {
+  await Package.findOneAndUpdate(
+    { key: plan },
+    { $setOnInsert: {
+        key: plan, name: planName || 'Bonus Access', amount: 0, durationDays: 0,
+        active: false, popular: false, badge: '', sortOrder: 999,
+        displayFeatures: ['Temporary full access, granted as a bonus'],
+      } },
+    { upsert: true }
+  );
+
+  const own = await getOwnActiveSubscription(userId);
+  const msInDay = 24 * 60 * 60 * 1000;
+
+  if (own) {
+    const base = own.expiresAt ? new Date(own.expiresAt) : new Date();
+    const newExpiresAt = new Date(base.getTime() + days * msInDay);
+    await Subscription.updateOne({ _id: own._id }, { $set: { expiresAt: newExpiresAt } });
+    return { appliedImmediately: false, expiresAt: newExpiresAt };
+  }
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + days * msInDay);
+  await Subscription.create({
+    userId, plan, planName: planName || `${days}-Day Free Access`,
+    amount: 0, status: 'active', startDate: now, expiresAt,
+  });
+  return { appliedImmediately: true, expiresAt };
+}
+
 module.exports = {
   getUserPlan, getPlanFeatures, getPlanName,
   getFeatureRequiredPlanText, getFeatureRequiredPlanMap,
   getPackageByKey, getAllActivePackages, getAllPackages,
   getEffectiveSubscription, getOwnActiveSubscription, getGroupSubscriptionForMember,
+  grantBonusAccessDays,
 };
