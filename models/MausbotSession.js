@@ -1,4 +1,4 @@
-// models/MausbotSession.js — backs the "SIDIS Seeds Agent" (internal name
+// models/MausbotSession.js — backs the "Sidis Agent" (internal name
 // still Mausbot — see routes/mausbot.js): AI-assisted long-form academic
 // work, one section at a time, resumable across many visits — the same
 // shape as TutorSession's section-by-section progression, just researching

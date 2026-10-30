@@ -1,4 +1,4 @@
-// routes/mausbot.js — backs the "SIDIS Seeds Agent" (internal name kept as
+// routes/mausbot.js — backs the "Sidis Agent" (internal name kept as
 // "Mausbot" — this file, the model, and the /api/mausbot prefix are an
 // implementation detail users never see). AI-assisted long-form academic
 // help, one section at a time:
@@ -52,7 +52,7 @@ async function checkAndReportQuota(userId) {
   if (count >= features.aiQuizzesPerMonth) {
     return {
       error:   'monthly_limit_reached',
-      message: `You've used all ${features.aiQuizzesPerMonth} AI generations for this month. Upgrade your plan for unlimited Seeds Agent generations.`,
+      message: `You've used all ${features.aiQuizzesPerMonth} AI generations for this month. Upgrade your plan for unlimited Sidis Agent generations.`,
       limit:   features.aiQuizzesPerMonth, used: count,
     };
   }
@@ -211,7 +211,7 @@ router.get('/sessions', auth, async (req, res) => {
       .select('-chapters.content').sort({ createdAt: -1 }).lean();
     res.json({ success: true, sessions });
   } catch (err) {
-    res.status(500).json({ error: `Failed to fetch Seeds Agent sessions: ${err.message}` });
+    res.status(500).json({ error: `Failed to fetch Sidis Agent sessions: ${err.message}` });
   }
 });
 
@@ -219,11 +219,11 @@ router.get('/sessions', auth, async (req, res) => {
 router.get('/:id', auth, async (req, res) => {
   try {
     const session = await MausbotSession.findOne({ _id: req.params.id, userId: req.user.userId }).lean();
-    if (!session) return res.status(404).json({ error: 'Seeds Agent session not found.' });
+    if (!session) return res.status(404).json({ error: 'Sidis Agent session not found.' });
     const paid = await isPaidUser(req.user.userId);
     res.json({ success: true, session, paid });
   } catch (err) {
-    res.status(500).json({ error: `Failed to fetch Seeds Agent session: ${err.message}` });
+    res.status(500).json({ error: `Failed to fetch Sidis Agent session: ${err.message}` });
   }
 });
 
@@ -332,7 +332,7 @@ router.post('/:id/chapter/:index/generate', auth, async (req, res) => {
       return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
 
     const session = await MausbotSession.findOne({ _id: req.params.id, userId: req.user.userId });
-    if (!session) return res.status(404).json({ error: 'Seeds Agent session not found.' });
+    if (!session) return res.status(404).json({ error: 'Sidis Agent session not found.' });
     const taskType = session.taskType || 'project';
 
     const idx = parseInt(req.params.index, 10);
@@ -447,7 +447,7 @@ router.post('/:id/chapter/:index/generate', auth, async (req, res) => {
 router.post('/:id/chapter/:index/check-quiz', auth, async (req, res) => {
   try {
     const session = await MausbotSession.findOne({ _id: req.params.id, userId: req.user.userId });
-    if (!session) return res.status(404).json({ error: 'Seeds Agent session not found.' });
+    if (!session) return res.status(404).json({ error: 'Sidis Agent session not found.' });
 
     const idx = parseInt(req.params.index, 10);
     const chapter = session.chapters[idx];
@@ -474,7 +474,7 @@ router.post('/:id/chapter/:index/check-quiz', auth, async (req, res) => {
 router.get('/:id/download', auth, async (req, res) => {
   try {
     const session = await MausbotSession.findOne({ _id: req.params.id, userId: req.user.userId }).lean();
-    if (!session) return res.status(404).json({ error: 'Seeds Agent session not found.' });
+    if (!session) return res.status(404).json({ error: 'Sidis Agent session not found.' });
     const taskType = session.taskType || 'project';
 
     const allReady = session.chapters.every(c => c.status === 'ready');
