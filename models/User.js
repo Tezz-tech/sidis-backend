@@ -76,6 +76,19 @@ const userSchema = new mongoose.Schema({
   // own Referral document (see models/Referral.js), not here.
   referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
 
+  // ── First-time signup survey ───────────────────────────
+  // Captured once, right after signup, to route a first-timer to the right
+  // part of the app instead of dropping them on a blank dashboard.
+  role:            { type: String, enum: ['student', 'teacher', 'professional', null], default: null },
+  studentLevel:    { type: String, enum: ['university', 'secondary', null], default: null },
+  studyGoal:       { type: String, enum: ['exam_prep', 'general_study', null], default: null },
+  surveyCompleted: { type: Boolean, default: false },
+
+  // ── Streak rewards ─────────────────────────────────────
+  // The highest streak length already rewarded, so a 7/14/21-day milestone
+  // only ever pays out once per streak count reached (see utils/userStats.js).
+  lastStreakRewardStreak: { type: Number, default: 0 },
+
   // ── SID's IQ subject interests ─────────────────────────
   // The subjects the student said they want to focus on/be recommended for
   // Sid IQ. Previously lived ONLY in browser localStorage, which meant the

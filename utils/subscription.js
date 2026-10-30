@@ -13,6 +13,21 @@ const DEFAULT_ACCESS = {
   sidIQMonthlyLimit: 0, adFree: false, tutorChatDailyLimit: 15,
 };
 
+// Paying for ANY plan unlocks EVERYTHING — packages only ever differ by
+// price/duration/group-size from here on, never by which features they
+// grant. This is also what fixes the class of bug where one specific paid
+// package (e.g. Yearly) had a stale/unchecked `access.sidIQ` flag in the
+// DB and so was quietly missing a feature every other paid plan had —
+// since paid access no longer reads the DB's per-package `access` object
+// at all, that kind of mismatch can't happen again. The admin package
+// editor's per-feature checkboxes now only have any effect on the 'free'
+// package.
+const FULL_ACCESS = {
+  aiQuizzesPerMonth: -1, unlimitedQuizzes: true, moreTools: true, studyJourney: true,
+  examMode: true, studyBuddy: true, forecaster: true, sidIQ: true,
+  sidIQMonthlyLimit: -1, adFree: true, tutorChatDailyLimit: -1,
+};
+
 async function getPackageByKey(key) {
   if (!key) return null;
   return Package.findOne({ key }).lean();
@@ -31,7 +46,8 @@ async function getAllPackages() {
  * 'free' package, then to a hardcoded default if the DB has neither).
  */
 async function getPlanFeatures(planKey) {
-  const pkg = await getPackageByKey(planKey) || await getPackageByKey('free');
+  if (planKey && planKey !== 'free') return FULL_ACCESS;
+  const pkg = await getPackageByKey('free');
   return pkg ? pkg.access : DEFAULT_ACCESS;
 }
 
@@ -56,14 +72,17 @@ function formatPrice(pkg) {
 }
 
 /**
- * The cheapest currently-active package that unlocks `featureKey`, formatted
- * as "Plan Name (₦price/period)" for upgrade prompts — or null if no active
- * package grants it.
+ * The cheapest currently-active PAID package, formatted as
+ * "Plan Name (₦price/period)" for upgrade prompts — or null if there is no
+ * active paid package at all. `featureKey` no longer narrows the search
+ * since every paid package now unlocks every feature (see FULL_ACCESS
+ * above) — any paid plan is a correct answer, so we just recommend the
+ * cheapest one.
  */
 async function getFeatureRequiredPlanText(featureKey) {
   const packages = await getAllActivePackages();
   const candidates = packages
-    .filter(p => p.key !== 'free' && p.access?.[featureKey])
+    .filter(p => p.key !== 'free')
     .sort((a, b) => a.amount - b.amount);
   if (candidates.length === 0) return null;
   return `${candidates[0].name} (${formatPrice(candidates[0])})`;

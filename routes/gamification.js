@@ -8,6 +8,8 @@ const Quiz    = require('../models/Quiz');
 const TopicMastery = require('../models/TopicMastery');
 const StudyPlan = require('../models/StudyPlan');
 const ActivityLog = require('../models/ActivityLog');
+const Subscription = require('../models/Subscription');
+const Package = require('../models/Package');
 const { getUserPlan, getPlanFeatures, getPlanName, getFeatureRequiredPlanMap } = require('../utils/subscription');
 
 // Feature keys worth pitching mid-conversation when a student hits one —
@@ -726,6 +728,7 @@ router.post('/remove-ads', auth, async (req, res) => {
 // feature — keep in sync with the routes actually defined in src/App.jsx.
 const APP_PAGES = [
   { route: '/over',           label: 'Dashboard',          desc: 'Home base — stats, streak, XP, and your recommended next action.' },
+  { route: '/ai-tutor',       label: 'AI Tutor',           desc: 'Upload a note and get taught through it section by section, with a quiz or flashcard check after each one and a readiness report at the end.' },
   { route: '/create-quiz',    label: 'Create a Quiz',      desc: 'Generate an AI quiz from a topic, pasted text, or an uploaded PDF/DOCX.' },
   { route: '/my-quizzes',     label: 'My Quizzes',         desc: 'Your quiz history and past results.' },
   { route: '/public-quizzes', label: 'Browse Quizzes',     desc: 'Community quizzes made by other students, searchable by subject.' },
@@ -875,6 +878,68 @@ Return JSON: { "reply": "...", "suggestedRoute": "/exact-route-from-list-or-null
     res.json({ success: true, reply, suggestedRoute, suggestedLabel });
   } catch (err) {
     console.error('Tutor chat error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── POST /api/gamification/redeem-xp ─────────────────────────────────────────
+// Trade XP directly for temporary full access (Exam Mode, SID IQ, every other
+// paid feature) — implemented as a short-lived Subscription so it rides on
+// the exact same access-gating path (getEffectiveSubscription/getPlanFeatures)
+// every real paid plan uses, rather than a parallel "unlock" system.
+const XP_PASS_OPTIONS = {
+  day:  { hours: 24,  cost: 120, label: '24-Hour Full Access Pass' },
+  week: { hours: 168, cost: 500, label: '7-Day Full Access Pass'  },
+};
+
+async function ensureXPPassPackage() {
+  await Package.findOneAndUpdate(
+    { key: 'xp_pass' },
+    { $setOnInsert: {
+        key: 'xp_pass', name: 'XP Pass', amount: 0, durationDays: 0,
+        active: false, popular: false, badge: '', sortOrder: 999,
+        displayFeatures: ['Temporary full access, redeemed with XP'],
+      } },
+    { upsert: true }
+  );
+}
+
+router.post('/redeem-xp', auth, async (req, res) => {
+  try {
+    const { option = 'day' } = req.body;
+    const choice = XP_PASS_OPTIONS[option];
+    if (!choice) return res.status(400).json({ error: 'Invalid option. Choose "day" or "week".' });
+
+    const user = await User.findById(req.user.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if ((user.xp || 0) < choice.cost)
+      return res.status(400).json({ error: `Need ${choice.cost} XP for the ${choice.label}. You have ${user.xp || 0} XP.` });
+
+    await ensureXPPassPackage();
+
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + choice.hours * 60 * 60 * 1000);
+
+    await Subscription.create({
+      userId: req.user.userId,
+      plan: 'xp_pass',
+      planName: choice.label,
+      amount: 0,
+      status: 'active',
+      startDate: now,
+      expiresAt,
+    });
+
+    await User.updateOne({ _id: req.user.userId }, { $inc: { xp: -choice.cost } });
+
+    res.json({
+      success:     true,
+      label:       choice.label,
+      expiresAt,
+      xpRemaining: (user.xp || 0) - choice.cost,
+    });
+  } catch (err) {
+    console.error('Redeem XP error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });

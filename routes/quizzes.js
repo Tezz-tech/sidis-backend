@@ -894,6 +894,7 @@ router.post("/quiz-results", auth, async (req, res) => {
 
     // ── Auto-award XP for completing this quiz ──
     let xpAward = null;
+    let streakReward = null;
     try {
       if (awardXP) {
         const User = require("../models/User");
@@ -924,7 +925,8 @@ router.post("/quiz-results", auth, async (req, res) => {
           // these fields directly off the User doc, but previously they were
           // only refreshed when the user happened to load their own
           // dashboard, silently going stale for everyone else in between.
-          await computeAndSyncUserStats(user, allResults);
+          const statsResult = await computeAndSyncUserStats(user, allResults);
+          streakReward = statsResult.streakReward || null;
         }
       }
     } catch (xpErr) {
@@ -947,6 +949,7 @@ router.post("/quiz-results", auth, async (req, res) => {
       message: "Quiz result saved successfully",
       resultId: result._id,
       xpAward: xpAward || null,
+      streakReward,
       adaptiveActions,
     });
   } catch (e) {

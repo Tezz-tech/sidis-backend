@@ -241,4 +241,42 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
+// ── POST /api/auth/survey ─────────────────────────────────────────────────────
+// First-login "what are you here for" survey. Saved server-side (not just
+// localStorage) so it persists across devices and can inform recommendations
+// elsewhere (AI Tutor, analytics, Study Planner defaults) later.
+const VALID_ROLES  = ['student', 'teacher', 'professional'];
+const VALID_LEVELS = ['university', 'secondary'];
+const VALID_GOALS  = ['exam_prep', 'general_study'];
+
+router.post('/survey', auth, async (req, res) => {
+  try {
+    const { role, studentLevel, studyGoal } = req.body;
+    if (!VALID_ROLES.includes(role))
+      return res.status(400).json({ error: 'role must be one of: student, teacher, professional' });
+    if (role === 'student' && !VALID_LEVELS.includes(studentLevel))
+      return res.status(400).json({ error: 'studentLevel must be one of: university, secondary' });
+    if (!VALID_GOALS.includes(studyGoal))
+      return res.status(400).json({ error: 'studyGoal must be one of: exam_prep, general_study' });
+
+    const update = {
+      role,
+      studentLevel: role === 'student' ? studentLevel : null,
+      studyGoal,
+      surveyCompleted: true,
+    };
+    await User.updateOne({ _id: req.user.userId }, { $set: update });
+
+    // Where to send a first-timer next — exam-prep goes to the Study Planner
+    // onboarding (date/subjects → generated schedule); everyone else goes
+    // straight to the dashboard with a short feature tour instead.
+    const nextStep = studyGoal === 'exam_prep' ? 'study_planner' : 'dashboard';
+
+    res.json({ success: true, ...update, nextStep });
+  } catch (error) {
+    console.error('Survey save error:', error);
+    res.status(500).json({ error: 'Error saving survey' });
+  }
+});
+
 module.exports = router;

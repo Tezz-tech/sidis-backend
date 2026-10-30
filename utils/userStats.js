@@ -72,24 +72,50 @@ async function computeAndSyncUserStats(user, results) {
   const newLastQuizDate = results.length > 0 ? results[0].createdAt : (user.lastQuizDate || null);
   const roundedHours = parseFloat(hoursPracticed.toFixed(1));
 
+  // Every 7-day streak milestone (7, 14, 21, ...) pays out once — gated on
+  // lastStreakRewardStreak so re-computing stats later the same day (or a
+  // streak that later breaks and climbs back past an old milestone) never
+  // double-pays the same milestone.
+  const STREAK_REWARD_XP = 50;
+  const lastRewarded = user.lastStreakRewardStreak || 0;
+  let streakReward = null;
+  const setFields = {
+    quizzesTaken, averageScore, totalScore, accuracy,
+    hoursPracticed: roundedHours,
+    currentStreak, bestStreak, weeklyImprovement,
+    lastQuizDate: newLastQuizDate,
+  };
+
+  if (currentStreak > 0 && currentStreak % 7 === 0 && currentStreak > lastRewarded) {
+    const discountCode = `STREAK${currentStreak}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30);
+    const discountEntry = {
+      id:        `disc_${Date.now()}`,
+      label:     '10% Off',
+      value:     10,
+      rarity:    'common',
+      emoji:     '🔥',
+      code:      discountCode,
+      expiresAt: expiresAt.toISOString(),
+      used:      false,
+      source:    'streak',
+    };
+    setFields.lastStreakRewardStreak = currentStreak;
+    setFields.xp = (user.xp || 0) + STREAK_REWARD_XP;
+    setFields.discounts = [...(Array.isArray(user.discounts) ? user.discounts : []), discountEntry];
+    streakReward = { days: currentStreak, xpAwarded: STREAK_REWARD_XP, discountCode, discountValue: 10 };
+  }
+
   const User = mongoose.model('User');
-  await User.updateOne(
-    { _id: user._id },
-    {
-      $set: {
-        quizzesTaken, averageScore, totalScore, accuracy,
-        hoursPracticed: roundedHours,
-        currentStreak, bestStreak, weeklyImprovement,
-        lastQuizDate: newLastQuizDate,
-      },
-    }
-  );
+  await User.updateOne({ _id: user._id }, { $set: setFields });
 
   return {
     quizzesTaken, averageScore, totalScore, accuracy,
     hoursPracticed: roundedHours,
     currentStreak, bestStreak, weeklyImprovement,
     lastQuizDate: newLastQuizDate,
+    streakReward,
   };
 }
 
