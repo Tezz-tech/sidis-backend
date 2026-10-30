@@ -101,8 +101,8 @@ router.post('/create', auth, async (req, res) => {
       uploadedFiles = [{ name: 'Pasted notes', textLength: combinedText.length }];
 
     // ── Path B: files — either legacy multipart (small files, under Vercel's
-    // 4.5 MB function body limit) or direct-to-blob URLs (uploaded straight
-    // from the browser to Vercel Blob, so they can be much larger) ──────────
+    // 4.5 MB function body limit) or direct-upload URLs (uploaded straight
+    // from the browser to Cloudinary, so they can be much larger) ──────────
     } else if ((req.files && Object.keys(req.files).length > 0) || (Array.isArray(req.body?.docUrls) && req.body.docUrls.length > 0)) {
       let fileList;
       try {

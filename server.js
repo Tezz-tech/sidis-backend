@@ -36,8 +36,8 @@ let catchupRoutes = null;
 try { catchupRoutes = require('./routes/catchup'); console.log('catchup routes: loaded'); } catch (e) { console.error('catchup load error:', e.message, e.stack); }
 let exammodeRoutes = null;
 try { exammodeRoutes = require('./routes/exammode'); console.log('exammode routes: loaded'); } catch (e) { console.error('exammode load error:', e.message, e.stack); }
-let blobRoutes = null;
-try { blobRoutes = require('./routes/blob'); console.log('blob routes: loaded'); } catch (e) { console.error('blob load error:', e.message, e.stack); }
+let cloudinaryRoutes = null;
+try { cloudinaryRoutes = require('./routes/cloudinary'); console.log('cloudinary routes: loaded'); } catch (e) { console.error('cloudinary load error:', e.message, e.stack); }
 let pushRoutes = null;
 try { pushRoutes = require('./routes/push'); console.log('push routes: loaded'); } catch (e) { console.error('push load error:', e.message, e.stack); }
 let referralRoutes = null;
@@ -182,7 +182,7 @@ if (collaborationRoutes) app.use('/api/collaboration', collaborationRoutes);
 if (groupRoutes)         app.use('/api/group',         groupRoutes);
 if (catchupRoutes)       app.use('/api/catchup',       catchupRoutes);
 if (exammodeRoutes)      app.use('/api/exammode',      exammodeRoutes);
-if (blobRoutes)          app.use('/api/blob',          blobRoutes);
+if (cloudinaryRoutes)    app.use('/api/cloudinary',    cloudinaryRoutes);
 if (pushRoutes)          app.use('/api/push',          pushRoutes);
 if (referralRoutes)      app.use('/api/referrals',     referralRoutes);
 if (tutorRoutes)         app.use('/api/tutor',         tutorRoutes);

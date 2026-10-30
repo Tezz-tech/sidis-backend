@@ -1,16 +1,17 @@
-// utils/blobFetch.js — downloads a Vercel Blob URL server-side and returns
-// it in the same shape express-fileupload gives a multipart file ({ data,
-// mimetype, name }), so every existing extraction path (extractPdfText,
-// mammoth, Gemini vision) keeps working unchanged regardless of whether a
-// file arrived via the legacy multipart route or a direct-to-blob upload.
+// utils/blobFetch.js — downloads an uploaded file's URL server-side and
+// returns it in the same shape express-fileupload gives a multipart file
+// ({ data, mimetype, name }), so every existing extraction path
+// (extractPdfText, mammoth, Gemini vision) keeps working unchanged
+// regardless of whether a file arrived via the legacy multipart route or a
+// direct-to-Cloudinary upload (see routes/cloudinary.js).
 //
-// Only fetches URLs on Vercel Blob's own storage domain — without this, a
-// client could pass any arbitrary URL (an internal service, a metadata
-// endpoint) for the server to blindly fetch on its behalf (SSRF).
+// Only fetches URLs on Cloudinary's own CDN domain — without this, a client
+// could pass any arbitrary URL (an internal service, a metadata endpoint)
+// for the server to blindly fetch on its behalf (SSRF).
 function isTrustedBlobUrl(url) {
   try {
     const { hostname, protocol } = new URL(url);
-    return protocol === 'https:' && hostname.endsWith('.public.blob.vercel-storage.com');
+    return protocol === 'https:' && hostname === 'res.cloudinary.com';
   } catch {
     return false;
   }
