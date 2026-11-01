@@ -27,6 +27,12 @@ const ExamModeSessionSchema = new mongoose.Schema({
     textLength: Number,
   }],
   pastQuestionsText: { type: String, default: '' },
+  // How pastQuestionsText was sourced — shapes both the UI's trust badge and
+  // the exam-generation prompt's wording about how much to trust it as real.
+  pastQuestionsSource: { type: String, enum: ['uploaded', 'web_verified', 'ai_unverified', null], default: null },
+  // Real citations when pastQuestionsSource is 'web_verified', so the
+  // student can check the sources themselves.
+  pastQuestionsSources: [{ title: String, url: String }],
 
   walkthroughIntro: { type: String, default: '' },
   walkthrough: [{
@@ -58,10 +64,21 @@ const ExamModeSessionSchema = new mongoose.Schema({
     // right, since that's usually a sign of shaky understanding too.
     timeAnalysis: [{
       topic:          String,
+      questionId:     { type: mongoose.Schema.Types.ObjectId, default: null },
       avgTimeSeconds: Number,
       correct:        Boolean,
       slow:           Boolean,
     }],
+    // The exact questions missed this attempt, by stable question _id —
+    // lets the results screen (and a future "review these" link) point at
+    // precisely what was failed, not just the topic name.
+    failedQuestionIds: [{ type: mongoose.Schema.Types.ObjectId }],
+    // What the adaptive engine already did in reaction to this attempt's
+    // topicBreakdown (POST /quizzes/quiz-results runs first and returns
+    // this — passed straight through here rather than re-derived, so the
+    // remediation cycle never fires twice for one attempt). Each entry:
+    // { subject, topic, easyDigest, quizId, quizTitle, planPatched }.
+    adaptiveActions: [{ type: mongoose.Schema.Types.Mixed }],
     createdAt:    { type: Date, default: Date.now },
   }],
 

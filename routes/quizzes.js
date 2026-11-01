@@ -836,7 +836,7 @@ router.post("/quiz-results", auth, async (req, res) => {
         const essayEntry = (essayAnswers || []).find(e => e.questionIndex === i);
         if (essayEntry) correct = (essayEntry.aiScore ?? 0) >= 60;
       }
-      return { questionIndex: i, subject: resolvedSubjectTag, topic, correct };
+      return { questionIndex: i, questionId: q._id, subject: resolvedSubjectTag, topic, correct };
     }).filter(t => t.correct !== null);
 
     const result = new QuizResult({

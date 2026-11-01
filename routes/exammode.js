@@ -9,6 +9,7 @@ const auth            = require('../middlewares/auth');
 const ExamModeSession = require('../models/ExamModeSession');
 const Quiz            = require('../models/Quiz');
 const QuizResult       = require('../models/QuizResult');
+const TopicMastery    = require('../models/TopicMastery');
 const { gemini }      = require('../utils/ai');
 const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
 const { extractPdfText, pdfParseAvailable } = require('../utils/pdfExtract');
@@ -91,10 +92,15 @@ const MAX_EXAM_BATCHES   = 3; // 3 × 20 = 60 — kept low since the whole
 // batches beats more, smaller ones for total round-trip latency, and 20
 // questions per call still comfortably fits the 8192-token output budget.
 
-function buildExamPrompt(session, askFor, coveredTopics) {
+function buildExamPrompt(session, askFor, coveredTopics, weakTopics) {
   const material  = session.combinedText.slice(0, 40000);
   const qaContext = session.qaSummary ? session.qaSummary.slice(0, 3000) : '';
   const pastQuestions = session.pastQuestionsText ? session.pastQuestionsText.slice(0, 20000) : '';
+  const pastQuestionsLabel = session.pastQuestionsSource === 'web_verified'
+    ? 'Real, verified past exam questions for this subject (found via live web search)'
+    : session.pastQuestionsSource === 'ai_unverified'
+    ? 'AI-synthesized practice-style past questions for this subject (NOT verified as real past papers — treat as a style/difficulty guide only, not confirmed fact)'
+    : 'Real past exam questions for this subject';
   return `You are a ruthless, expert examiner setting an EXTREMELY HARD, in-depth, COMPREHENSIVE exam paper for ${session.subject} — the kind only a student with genuine mastery of the entire material can pass.
 
 ${DISCIPLINE_MIXED_INSTRUCTION}
@@ -107,8 +113,9 @@ If the material contains ANY calculations, formulas, or numeric worked examples,
 
 Class material:
 ${material}
-${pastQuestions ? `\nReal past exam questions for this subject were also provided below — study them closely and use them to forecast what's actually likely to be asked: match their real difficulty, phrasing style, question format, and which topics they emphasize most. Do not copy them verbatim, but let them shape the style and focus of the new exam.\n\n${pastQuestions}\n` : ''}
+${pastQuestions ? `\n${pastQuestionsLabel} were also provided below — study them closely and use them to forecast what's actually likely to be asked: match their real difficulty, phrasing style, question format, and which topics they emphasize most. Do not copy them verbatim, but let them shape the style and focus of the new exam.\n\n${pastQuestions}\n` : ''}
 ${qaContext ? `\nDuring study, the student and their tutor discussed the following — weight the exam toward areas that seemed weak or heavily discussed:\n${qaContext}` : ''}
+${weakTopics?.length ? `\nThis student has a documented history of struggling with these specific sub-topics in ${session.subject}, from past quizzes: ${weakTopics.join(', ')}. Personalize this exam by testing these areas thoroughly, in addition to full coverage of the material — don't let them pass without being properly challenged on their known weak spots.` : ''}
 ${coveredTopics.length ? `\nQuestions have already been written covering: ${coveredTopics.join('; ')}. Do NOT repeat these — go deeper into the material or test different angles/sub-topics still untested.` : ''}
 
 Return ONLY valid JSON:
@@ -122,6 +129,21 @@ CRITICAL for MCQ accuracy: for every numeric/calculation MCQ, use "workingScratc
 Write up to ${askFor} questions — but ONLY if the material genuinely supports that many distinct, non-repetitive, in-depth questions. Return fewer rather than pad with filler or restate the same idea twice. correctAnswer is the 0-based index of the correct option, only for "mcq" questions.`;
 }
 
+// This student's documented weak sub-topics for the session's subject, from
+// the same TopicMastery ledger the rest of the app's adaptive learning uses
+// (Sid IQ's weak-subject recommendations, the auto-remediation cycle) — so
+// "personalize the exam" means the same thing everywhere, not a separate
+// Exam-Mode-only notion of weakness.
+async function getWeakTopicsFor(userId, subject) {
+  try {
+    const docs = await TopicMastery.find({ userId, subject, status: 'weak' })
+      .sort({ masteryScore: 1 }).limit(8).select('topic').lean();
+    return docs.map(d => d.topic).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 // Generates up to MAX_EXAM_QUESTIONS in batches (rather than one huge
 // request) so a genuinely deep exam doesn't risk truncating mid-response,
 // and so each batch can be told what's already been asked to avoid
@@ -130,10 +152,11 @@ Write up to ${askFor} questions — but ONLY if the material genuinely supports 
 async function generateExamQuiz(session) {
   let allQuestions   = [];
   let coveredTopics  = [];
+  const weakTopics = await getWeakTopicsFor(session.userId, session.subject);
 
   for (let batch = 0; batch < MAX_EXAM_BATCHES && allQuestions.length < MAX_EXAM_QUESTIONS; batch++) {
     const askFor = Math.min(EXAM_BATCH_SIZE, MAX_EXAM_QUESTIONS - allQuestions.length);
-    const examPrompt = buildExamPrompt(session, askFor, coveredTopics);
+    const examPrompt = buildExamPrompt(session, askFor, coveredTopics, weakTopics);
 
     let batchRaw;
     try {
@@ -205,11 +228,12 @@ const ADD_QUESTIONS_MAX_PER_CALL = 40;
 async function generateMoreExamQuestions(session, quiz, requestedCount) {
   const targetCount  = Math.max(1, Math.min(requestedCount, ADD_QUESTIONS_MAX_PER_CALL));
   const coveredTopics = (quiz.questions || []).map(q => q.topic).filter(Boolean);
+  const weakTopics = await getWeakTopicsFor(session.userId, session.subject);
 
   let newRaw = [];
   for (let batch = 0; batch < MAX_EXAM_BATCHES && newRaw.length < targetCount; batch++) {
     const askFor = Math.min(EXAM_BATCH_SIZE, targetCount - newRaw.length);
-    const examPrompt = buildExamPrompt(session, askFor, [...coveredTopics, ...newRaw.map(q => q.topic).filter(Boolean)]);
+    const examPrompt = buildExamPrompt(session, askFor, [...coveredTopics, ...newRaw.map(q => q.topic).filter(Boolean)], weakTopics);
 
     let batchRaw;
     try {
@@ -256,6 +280,78 @@ async function generateMoreExamQuestions(session, quiz, requestedCount) {
   await quiz.save();
   return newQuestions.length;
 }
+
+// ── POST /api/exammode/find-past-questions ──────────────────────────────────
+// Body: { subject, title?, source: 'web' | 'ai' }. Lets the student skip
+// having their own past papers to upload/paste: 'web' searches the live web
+// for real past exam questions (grounded, with citations); 'ai' writes
+// plausible practice-style questions from the model's own knowledge,
+// explicitly labeled as NOT real/verified. Returns pastQuestionsText ready
+// to pass straight into /create. Doesn't touch any session — this can be
+// called (and re-called, to try the other source) before one exists.
+router.post('/find-past-questions', auth, requireExamModeAccess, async (req, res) => {
+  try {
+    if (!gemini.ready)
+      return res.status(503).json({ error: 'AI service is temporarily unavailable. Please try again shortly.' });
+
+    const subject = (req.body?.subject || '').trim();
+    const title   = (req.body?.title   || '').trim();
+    const source  = req.body?.source === 'ai' ? 'ai' : 'web';
+    if (!subject) return res.status(400).json({ error: 'Subject is required.' });
+
+    if (source === 'web') {
+      const prompt = `Find real past exam questions for "${subject}"${title ? ` — specifically: ${title}` : ''} by searching the web for actual past papers, question banks, or sample questions from real courses, textbooks, or institutions.
+
+Compile the most representative real questions you find into a clean, readable list — one question per line or short paragraph, grouped by topic if there's a natural grouping. Include enough of each question that its content and difficulty level are clear.
+
+Write ONLY the compiled past questions — no preamble, no meta-commentary.`;
+      let draft;
+      try {
+        draft = await gemini.generateGroundedText(prompt, { maxOutputTokens: 4096, temperature: 0.4 });
+      } catch (aiErr) {
+        return res.status(500).json({ error: `Could not search for past questions: ${aiErr.message}` });
+      }
+      if (!draft?.text?.trim())
+        return res.status(422).json({ error: 'Could not find real past questions for this subject. Try the AI-generated option instead, or paste/upload your own.' });
+
+      // generateGroundedText silently falls back to an ungrounded call if
+      // search grounding itself fails — be honest about which one actually
+      // happened rather than trusting the request's intent.
+      return res.json({
+        success:              true,
+        pastQuestionsText:    draft.text.trim().slice(0, 20000),
+        pastQuestionsSource:  draft.grounded ? 'web_verified' : 'ai_unverified',
+        pastQuestionsSources: draft.sources || [],
+        grounded:             !!draft.grounded,
+      });
+    }
+
+    // source === 'ai'
+    const prompt = `Write plausible, realistic past-exam-style practice questions for "${subject}"${title ? ` — specifically: ${title}` : ''}, based on your general knowledge of how this subject is typically examined.
+
+IMPORTANT: these are NOT real, verified past exam questions — they are AI-synthesized practice questions written in a similar style and difficulty to typical exams on this subject. Write a clean, readable list of 10-15 such questions, grouped by topic if there's a natural grouping.
+
+Write ONLY the questions — no preamble, no meta-commentary, and do not claim or imply these are real past papers.`;
+    let text;
+    try {
+      text = await gemini.generateText(prompt, { maxOutputTokens: 3000, temperature: 0.7 });
+    } catch (aiErr) {
+      return res.status(500).json({ error: `AI failed to generate practice questions: ${aiErr.message}` });
+    }
+    if (!text?.trim()) return res.status(500).json({ error: 'AI returned nothing. Please try again.' });
+
+    res.json({
+      success:              true,
+      pastQuestionsText:    text.trim().slice(0, 20000),
+      pastQuestionsSource:  'ai_unverified',
+      pastQuestionsSources: [],
+      grounded:             false,
+    });
+  } catch (err) {
+    console.error('[exammode] find-past-questions error:', err.message);
+    res.status(500).json({ error: `Unexpected error: ${err.message || 'unknown'}` });
+  }
+});
 
 // ── POST /api/exammode/create ─────────────────────────────────────────────────
 // Accepts EITHER: multipart (fields: title, subject; files: docs) OR
@@ -316,15 +412,25 @@ router.post('/create', auth, requireExamModeAccess, async (req, res) => {
     // of which mode the main material used, to keep this additive step simple.
     let pastQuestionsText  = '';
     let pastQuestionsFiles = [];
+    let pastQuestionsSource  = null;
+    let pastQuestionsSources = [];
     if (req.body?.pastQuestionsText?.trim()) {
       pastQuestionsText  = req.body.pastQuestionsText.trim().slice(0, 30000);
       pastQuestionsFiles = [{ name: 'Pasted past questions', textLength: pastQuestionsText.length }];
+      // Either genuinely typed/pasted by the student, or forwarded here from
+      // a prior /find-past-questions call (web-verified or AI-unverified) —
+      // the client says which via pastQuestionsSource; default to 'uploaded'
+      // for raw pasted text with no stated source.
+      const validSources = ['uploaded', 'web_verified', 'ai_unverified'];
+      pastQuestionsSource  = validSources.includes(req.body?.pastQuestionsSource) ? req.body.pastQuestionsSource : 'uploaded';
+      pastQuestionsSources = Array.isArray(req.body?.pastQuestionsSources) ? req.body.pastQuestionsSources.slice(0, 20) : [];
     } else if (req.files?.pastQuestions || (Array.isArray(req.body?.pastQuestionUrls) && req.body.pastQuestionUrls.length > 0)) {
       try {
         const pqList = await resolveUploadedFiles(req, { fileField: 'pastQuestions', urlField: 'pastQuestionUrls' });
         const { chunks, meta } = await extractTextFromFiles(pqList);
         pastQuestionsText  = chunks.join('\n\n').slice(0, 30000);
         pastQuestionsFiles = meta;
+        pastQuestionsSource = 'uploaded';
       } catch (extractErr) {
         console.warn('[exammode] past-questions extraction failed, continuing without them:', extractErr.message);
       }
@@ -420,6 +526,8 @@ RULES:
       combinedText,
       pastQuestionsFiles,
       pastQuestionsText,
+      pastQuestionsSource,
+      pastQuestionsSources,
       walkthroughIntro,
       walkthrough,
     });
@@ -433,6 +541,7 @@ RULES:
       walkthrough:           session.walkthrough,
       filesProcessed:        uploadedFiles.length,
       pastQuestionsProcessed: pastQuestionsFiles.length,
+      pastQuestionsSource,
     });
   } catch (err) {
     console.error('[exammode] /create unexpected error:', err.message);
@@ -619,7 +728,7 @@ router.post('/:id/add-questions', auth, requireExamModeAccess, async (req, res) 
 // grounded in the attempt's actual weak topics.
 router.post('/:id/report-result', auth, async (req, res) => {
   try {
-    const { quizResultId } = req.body;
+    const { quizResultId, adaptiveActions: reportedActions } = req.body;
     if (!quizResultId) return res.status(400).json({ error: 'quizResultId is required' });
 
     const session = await ExamModeSession.findOne({ _id: req.params.id, userId: req.user.userId });
@@ -632,15 +741,17 @@ router.post('/:id/report-result', auth, async (req, res) => {
     const passed = result.score >= session.passThreshold;
 
     // Per-topic time spent — joins timePerQuestion (by index) onto
-    // topicBreakdown (which already carries topic + correctness per
-    // question). "Slow" is relative to this attempt's own average, so it
-    // adapts to exam length rather than using a fixed second count.
+    // topicBreakdown (which already carries topic + correctness + the
+    // question's own stable _id per question). "Slow" is relative to this
+    // attempt's own average, so it adapts to exam length rather than using
+    // a fixed second count.
     const times = result.timePerQuestion || [];
     const avgTime = times.length ? times.reduce((s, t) => s + (t || 0), 0) / times.length : 0;
     const timeAnalysis = (result.topicBreakdown || [])
       .filter(t => t.topic && Number.isFinite(times[t.questionIndex]))
       .map(t => ({
         topic:          t.topic,
+        questionId:     t.questionId || null,
         avgTimeSeconds: Math.round(times[t.questionIndex]),
         correct:        t.correct,
         slow:           avgTime > 0 && times[t.questionIndex] > avgTime * 1.5,
@@ -648,6 +759,18 @@ router.post('/:id/report-result', auth, async (req, res) => {
     // A topic that was slow to answer even when correct is still worth
     // flagging — slow-but-right usually means shaky, not solid, understanding.
     const needsWork = timeAnalysis.filter(t => !t.correct || t.slow);
+    const failedQuestionIds = timeAnalysis.filter(t => !t.correct && t.questionId).map(t => t.questionId);
+
+    // The adaptive engine already ran against this exact attempt's
+    // topicBreakdown — POST /quizzes/quiz-results (called just before this,
+    // right after the attempt was saved) returns its actions, and the
+    // frontend forwards them here rather than this route re-triggering the
+    // same cycle a second time (which would double-generate practice
+    // quizzes/plan sessions for one attempt). Lightly validated, not
+    // trusted blindly, since it's still client-supplied.
+    const adaptiveActions = Array.isArray(reportedActions)
+      ? reportedActions.filter(a => a && typeof a === 'object' && a.topic).slice(0, 10)
+      : [];
 
     let retakeAdvice = '';
 
@@ -668,12 +791,18 @@ Return ONLY valid JSON: { "advice": "..." }`;
       }
     }
 
-    session.attempts.push({ quizResultId: result._id, score: result.score, passed, retakeAdvice, timeAnalysis });
+    session.attempts.push({
+      quizResultId: result._id, score: result.score, passed, retakeAdvice, timeAnalysis,
+      failedQuestionIds, adaptiveActions,
+    });
     session.phase     = 'completed';
     session.updatedAt = new Date();
     await session.save();
 
-    res.json({ success: true, passed, score: result.score, passThreshold: session.passThreshold, retakeAdvice, timeAnalysis });
+    res.json({
+      success: true, passed, score: result.score, passThreshold: session.passThreshold,
+      retakeAdvice, timeAnalysis, failedQuestionIds, adaptiveActions,
+    });
   } catch (err) {
     console.error('[exammode] report-result error:', err.message);
     res.status(500).json({ error: `Failed to report result: ${err.message || 'unknown'}` });

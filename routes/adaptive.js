@@ -101,6 +101,7 @@ router.get('/review-mistakes', auth, async (req, res) => {
           quizId: r.quizId,
           quizTitle: quiz.title,
           questionIndex: entry.questionIndex,
+          questionId: entry.questionId || q._id,
           question: q.question,
           options: q.options,
           correctAnswer: q.correctAnswer,

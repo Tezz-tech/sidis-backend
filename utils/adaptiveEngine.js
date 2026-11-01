@@ -215,7 +215,12 @@ async function runAdaptiveCycle(userId, subject, topic) {
     }
   );
 
-  return { subject, topic, easyDigest, quizId: quiz?._id || null, quizTitle: quiz?.title || '', planPatched: !!patchedPlan };
+  return {
+    subject, topic, easyDigest,
+    quizId: quiz?._id || null, quizTitle: quiz?.title || '',
+    planPatched: !!patchedPlan,
+    examDate: patchedPlan?.examDate || null, // so the UI can say *when* this is due by
+  };
 }
 
 // ── Entry point called right after a quiz result is saved ───────────────────

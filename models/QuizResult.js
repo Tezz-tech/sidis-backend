@@ -9,6 +9,11 @@ const essayAnswerSchema = new mongoose.Schema({
 
 const topicOutcomeSchema = new mongoose.Schema({
   questionIndex: Number,
+  // The question subdocument's own stable _id (every Quiz question already
+  // has one) — lets a missed question be traced precisely even if
+  // questionIndex would otherwise be ambiguous, and lets remediation link
+  // straight back to the exact question that was failed.
+  questionId: { type: mongoose.Schema.Types.ObjectId, default: null },
   subject: String,
   topic: String,
   correct: Boolean,
