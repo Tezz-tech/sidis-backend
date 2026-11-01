@@ -55,4 +55,14 @@ function resolveSpecificSubject(subject, title) {
   return 'General';
 }
 
-module.exports = { resolveSpecificSubject, SUBJECT_KEYWORDS };
+// A subject string is often free text a user typed (quiz "Field of Study",
+// an AI-resolved title fragment, etc.), so it can contain regex metacharacters
+// like "C++", "A/L Physics (2024)", or "Chem. 101" — building a RegExp
+// straight from it throws a SyntaxError for those, which previously crashed
+// Sidis IQ and Study Journey's recommended-quizzes lookups every single time
+// for any account whose quiz history happened to include such a subject.
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+module.exports = { resolveSpecificSubject, SUBJECT_KEYWORDS, escapeRegExp };

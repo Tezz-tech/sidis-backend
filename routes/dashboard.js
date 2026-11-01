@@ -10,7 +10,7 @@ const FlashcardSet = require('../models/FlashcardSet');
 const ActivityLog = require('../models/ActivityLog');
 
 const { gemini, capText } = require('../utils/ai');
-const { resolveSpecificSubject } = require('../utils/subjectResolver');
+const { resolveSpecificSubject, escapeRegExp } = require('../utils/subjectResolver');
 const { computeAndSyncUserStats } = require('../utils/userStats');
 const { getUserPlan, getPlanFeatures } = require('../utils/subscription');
 
@@ -173,7 +173,7 @@ router.get('/rankings', auth, async (req, res) => {
   }
 });
 
-// Sid IQ endpoint — performance profile + recommendations
+// Sidis IQ endpoint — performance profile + recommendations
 router.get('/sid-iq', auth, async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -183,12 +183,12 @@ router.get('/sid-iq', auth, async (req, res) => {
     if (!features.sidIQ) {
       return res.status(403).json({
         error:    'plan_required',
-        message:  "SID's IQ is available on all paid plans except Exam Mode.",
+        message:  "Sidis IQ is available on all paid plans except Exam Mode.",
         required: 'weekly_group',
       });
     }
 
-    // Fire-and-forget usage tracking — SID's IQ has no collection of its
+    // Fire-and-forget usage tracking — Sidis IQ has no collection of its
     // own to count from, so the admin feature-usage overview reads this
     // off the shared ActivityLog instead. Never allowed to block or fail
     // the actual feature.
@@ -325,7 +325,7 @@ router.get('/sid-iq', auth, async (req, res) => {
     const searchSubjects = weakSubjects.length > 0 ? weakSubjects : userInterests;
     let recommendedQuizzes = searchSubjects.length > 0
       ? await Quiz.find({
-          subject: { $in: searchSubjects.map(s => new RegExp(s, 'i')) },
+          subject: { $in: searchSubjects.map(s => new RegExp(escapeRegExp(s), 'i')) },
           isPublic: true
         }).limit(6).select('title subject numQuestions difficulty').lean()
       : [];
@@ -343,7 +343,7 @@ router.get('/sid-iq', auth, async (req, res) => {
     if (weakSubjects.length > 0) {
       studyTip = `Focus on ${weakSubjects.join(', ')} — these are your weakest areas. Spending 20 minutes daily on targeted practice in these subjects can improve your score significantly.`;
     } else if (userInterests.length > 0 && matchedSearchSubjects) {
-      studyTip = `Here are some ${userInterests.slice(0, 3).join(', ')} quizzes based on your interests. Complete them to start building your Sid IQ profile!`;
+      studyTip = `Here are some ${userInterests.slice(0, 3).join(', ')} quizzes based on your interests. Complete them to start building your Sidis IQ profile!`;
     } else if (strongSubjects.length > 0) {
       studyTip = `Great work on ${strongSubjects.join(', ')}! Maintain your momentum and challenge yourself with harder difficulty levels.`;
     }
@@ -390,7 +390,7 @@ Return ONLY valid JSON: { "tip": "..." }`;
       }))
     });
   } catch (error) {
-    console.error("Sid IQ error:", error);
+    console.error("Sidis IQ error:", error);
     res.status(500).json({ success: false, error: "Server error" });
   }
 });

@@ -15,7 +15,7 @@ let awardXP = null;
 try { ({ awardXP } = require("../utils/gamificationUtils")); } catch (_) {}
 
 const { gemini, capText } = require("../utils/ai");
-const { resolveSpecificSubject } = require("../utils/subjectResolver");
+const { resolveSpecificSubject, escapeRegExp } = require("../utils/subjectResolver");
 const { DISCIPLINE_MIXED_INSTRUCTION, DISCIPLINE_MCQ_INSTRUCTION } = require("../utils/disciplinePrompt");
 const { getDifficultyInstruction } = require("../utils/difficultyPrompt");
 const { processQuizResult } = require("../utils/adaptiveEngine");
@@ -165,7 +165,7 @@ Return ONLY valid JSON: { "transcript": "..." }`;
     else if (source === "question-bank") {
       const search = bankSubject || subject || "";
       const bankQuizzes = await Quiz.find({
-        subject: { $regex: search, $options: "i" },
+        subject: { $regex: escapeRegExp(search), $options: "i" },
       }).limit(20).lean();
 
       const bankQuestions = [];
@@ -727,7 +727,7 @@ router.get("/question-bank", auth, async (req, res) => {
     const limit = Math.min(50, parseInt(req.query.limit) || 20);
 
     const quizzes = await Quiz.find({
-      subject: { $regex: subject, $options: "i" },
+      subject: { $regex: escapeRegExp(subject), $options: "i" },
     }).select("title subject questions").limit(10).lean();
 
     const questions = [];
@@ -969,8 +969,8 @@ router.get("/public/sets", async (req, res) => {
     const search = (req.query.search || "").trim();
     const filter = search
       ? { $or: [
-          { title:   { $regex: search, $options: "i" } },
-          { subject: { $regex: search, $options: "i" } },
+          { title:   { $regex: escapeRegExp(search), $options: "i" } },
+          { subject: { $regex: escapeRegExp(search), $options: "i" } },
         ] }
       : {};
 

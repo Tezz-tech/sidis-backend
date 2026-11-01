@@ -42,6 +42,7 @@ function getProfanityFilter() {
 }
 
 const { gemini } = require('../utils/ai');
+const { escapeRegExp } = require('../utils/subjectResolver');
 
 // ─── GET /api/gamification/profile ────────────────────────────────────────────
 router.get('/profile', auth, async (req, res) => {
@@ -315,7 +316,7 @@ router.get('/study-journey', auth, async (req, res) => {
     let recommendedQuizzes = [];
     if (weakSubjects.length > 0) {
       recommendedQuizzes = await Quiz.find({
-        subject: { $in: weakSubjects.map(s => new RegExp(s, 'i')) },
+        subject: { $in: weakSubjects.map(s => new RegExp(escapeRegExp(s), 'i')) },
         isPublic: true,
       }).limit(3).select('title subject numQuestions difficulty').lean();
     }
@@ -758,7 +759,7 @@ const APP_PAGES = [
   { route: '/create-flashcard', label: 'Create Flashcards', desc: 'Generate flashcards from a topic, pasted text, or an uploaded PDF.' },
   { route: '/my-flashcards',  label: 'My Flashcards',      desc: 'Your saved flashcard sets and study progress.' },
   { route: '/public-flashcards', label: 'Browse Flashcards', desc: 'Community flashcard sets made by other students.' },
-  { route: '/sid-iq',         label: "SID's IQ",           desc: 'Adaptive learning profile — exam readiness score, weak/strong subjects, personalised recommendations.' },
+  { route: '/sid-iq',         label: "Sidis IQ",           desc: 'Adaptive learning profile — exam readiness score, weak/strong subjects, personalised recommendations.' },
   { route: '/study-journey',  label: 'Study Journey',      desc: 'Guided step-by-step milestones with XP rewards.' },
   { route: '/more-tools',     label: 'More Tools',         desc: 'Hub for Study Planner, Study Catch-Up, Question Forecaster, Discount Randomizer, Ads Remover.' },
   { route: '/study-planner',  label: 'Study Planner',      desc: 'AI-generated day-by-day study schedule for an upcoming exam.' },
@@ -837,7 +838,7 @@ router.post('/tutor-chat', auth, async (req, res) => {
         const labels = {
           moreTools: 'Study Planner, Study Catch-Up, and other extra tools', studyJourney: 'Study Journey',
           examMode: 'Exam Mode (guided walkthrough + timed exam)', studyBuddy: 'unlimited AI tutor chat',
-          forecaster: 'the Question Forecaster', sidIQ: "SID's IQ adaptive learning profile",
+          forecaster: 'the Question Forecaster', sidIQ: "Sidis IQ adaptive learning profile",
         };
         return `${labels[key] || key} (needs ${requiredPlanMap[key]})`;
       });
@@ -906,7 +907,7 @@ Return JSON: { "reply": "...", "suggestedRoute": "/exact-route-from-list-or-null
 });
 
 // ─── POST /api/gamification/redeem-xp ─────────────────────────────────────────
-// Trade XP directly for temporary full access (Exam Mode, SID IQ, every other
+// Trade XP directly for temporary full access (Exam Mode, Sidis IQ, every other
 // paid feature) — implemented as a short-lived Subscription so it rides on
 // the exact same access-gating path (getEffectiveSubscription/getPlanFeatures)
 // every real paid plan uses, rather than a parallel "unlock" system.

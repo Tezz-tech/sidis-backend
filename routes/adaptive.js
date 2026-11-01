@@ -13,7 +13,7 @@ const {
 
 // ─── GET /api/adaptive/insights ────────────────────────────────────────────────
 // Weak topics + the feed of automatic actions already taken. Powers the
-// "Sid IQ" page's topic-level (not just subject-level) weak-spot list.
+// "Sidis IQ" page's topic-level (not just subject-level) weak-spot list.
 router.get('/insights', auth, async (req, res) => {
   try {
     const [topics, user] = await Promise.all([
@@ -34,7 +34,7 @@ router.get('/insights', auth, async (req, res) => {
         status: t.status,
         easyDigest: t.easyDigest || null,
         // Whether this topic's subject is one the student said they're
-        // focused on via SID's IQ — lets the page agree with itself instead
+        // focused on via Sidis IQ — lets the page agree with itself instead
         // of showing weak-topic call-outs unrelated to stated interests.
         matchesInterest: matchesInterest(t.subject),
       }))
@@ -137,7 +137,7 @@ async function dailySweep(req, res) {
   // practice quizzes and study-plan sessions from a single silent sweep —
   // cap how many auto-actions fire per user per run, and when trimming to
   // that cap, prefer topics in subjects the student actually said they're
-  // focused on via SID's IQ (falls back to weakest-first when they haven't
+  // focused on via Sidis IQ (falls back to weakest-first when they haven't
   // set any interests, i.e. unchanged behaviour for those users).
   const MAX_ACTIONS_PER_USER = 3;
 

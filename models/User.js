@@ -89,9 +89,9 @@ const userSchema = new mongoose.Schema({
   // only ever pays out once per streak count reached (see utils/userStats.js).
   lastStreakRewardStreak: { type: Number, default: 0 },
 
-  // ── SID's IQ subject interests ─────────────────────────
+  // ── Sidis IQ subject interests ─────────────────────────
   // The subjects the student said they want to focus on/be recommended for
-  // Sid IQ. Previously lived ONLY in browser localStorage, which meant the
+  // Sidis IQ. Previously lived ONLY in browser localStorage, which meant the
   // server-side adaptive learning engine (daily cron, weak-topic insights)
   // had no way to know it and could act on/surface subjects the student
   // never expressed interest in. Persisted here so both sides agree.

@@ -198,7 +198,7 @@ router.get('/my-subscription', auth, async (req, res) => {
 
 // ── GET /api/payments/my-features ─────────────────────────────────────────────
 // Returns the current user's plan key, display name, feature flags,
-// and usage counters (AI quizzes this month, SID IQ uses this month).
+// and usage counters (AI quizzes this month, Sidis IQ uses this month).
 router.get('/my-features', auth, async (req, res) => {
   try {
     const { subscription, viaGroup } = await getEffectiveSubscription(req.user.userId);

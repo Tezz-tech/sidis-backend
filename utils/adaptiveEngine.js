@@ -12,6 +12,7 @@ const TopicMastery  = require('../models/TopicMastery');
 const Quiz          = require('../models/Quiz');
 const StudyPlan     = require('../models/StudyPlan');
 const { gemini }    = require('./ai');
+const { escapeRegExp } = require('./subjectResolver');
 
 const WEAK_THRESHOLD   = 60;
 const STRONG_THRESHOLD = 80;
@@ -169,7 +170,7 @@ async function patchStudyPlanWithTopic(userId, subject, topic, quiz) {
     userId,
     generated: true,
     examDate: { $gt: new Date() },
-    subjects: { $regex: new RegExp(`^${subject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+    subjects: { $regex: new RegExp(`^${escapeRegExp(subject)}$`, 'i') },
   }).sort({ examDate: 1 });
   if (!plan) return null;
 

@@ -7,6 +7,7 @@ const FlashcardProgress = require("../models/FlashcardProgress");
 const { extractPdfText, pdfParseAvailable } = require("../utils/pdfExtract");
 const { resolveUploadedFiles } = require("../utils/blobFetch");
 const { extractUrlText } = require("../utils/urlExtract");
+const { escapeRegExp } = require("../utils/subjectResolver");
 require("dotenv").config();
 
 const { gemini, capText } = require("../utils/ai");
@@ -391,8 +392,8 @@ router.get("/public/sets", async (req, res) => {  // Removed: auth
     const search = (req.query.search || "").trim();
     const searchFilter = search
       ? { $or: [
-          { title:   { $regex: search, $options: "i" } },
-          { subject: { $regex: search, $options: "i" } },
+          { title:   { $regex: escapeRegExp(search), $options: "i" } },
+          { subject: { $regex: escapeRegExp(search), $options: "i" } },
         ] }
       : {};
 

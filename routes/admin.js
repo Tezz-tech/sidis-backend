@@ -1283,7 +1283,7 @@ router.delete('/contact-messages/:id', async (req, res) => {
 // ==================== FEATURE USAGE OVERVIEW ====================
 // Every feature that has its own collection (Quiz, FlashcardSet,
 // CatchUpSession, ExamModeSession, StudyPlan, ExamForecast) is counted
-// directly from it. SID's IQ and Study Buddy/tutor-chat have no persisted
+// directly from it. Sidis IQ and Study Buddy/tutor-chat have no persisted
 // records of their own anywhere in the app — they're logged to the shared
 // ActivityLog instead (see the sidiq_viewed / tutor_chat_message writes in
 // routes/dashboard.js and routes/gamification.js), grouped here the same way.
@@ -1327,7 +1327,7 @@ router.get('/features/summary', async (req, res) => {
       { key: 'exammode',     label: 'Exam Mode',           icon: 'Zap',            ...exammode, extra: { completedExams: examCompleted, passedExams: examPassed } },
       { key: 'studyplanner', label: 'Study Planner',       icon: 'CalendarCheck',  ...studyplanner },
       { key: 'forecaster',   label: 'Question Forecaster', icon: 'TrendingUp',     ...forecaster },
-      { key: 'sidiq',        label: "SID's IQ",            icon: 'Brain',          ...sidiq },
+      { key: 'sidiq',        label: "Sidis IQ",            icon: 'Brain',          ...sidiq },
       { key: 'tutorchat',    label: 'Study Buddy Chat',    icon: 'MessageCircle',  ...tutorchat },
     ];
 
