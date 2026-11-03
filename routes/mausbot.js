@@ -96,7 +96,7 @@ Below is the raw assignment/assessment material (it may contain some noise from 
 ${rawText.slice(0, 30000)}
 """
 
-Identify every distinct question/problem in it, in the order they appear. Each item's text should be the COMPLETE question exactly as given — every part, sub-part, piece of given data, and any diagram/table description needed to solve it. Do not shorten, solve, or editorialize.
+Identify every distinct question/problem in it, in the order they appear — up to a maximum of ${MAX_CHAPTERS}; if there are more than that, keep only the first ${MAX_CHAPTERS} in order. Each item's text should be the COMPLETE question exactly as given — every part, sub-part, piece of given data, and any diagram/table description needed to solve it — but do not pad it with unnecessary repetition of the material, and do not shorten, solve, or editorialize.
 
 Return ONLY valid JSON: { "problems": ["full text of question 1", "full text of question 2", ...] }`;
 }
@@ -184,7 +184,7 @@ router.post('/create', auth, async (req, res) => {
 
     let problems;
     try {
-      const parsed = await gemini.generateJSON(buildSplitProblemsPrompt(rawText), { maxOutputTokens: 4096, temperature: 0.3 });
+      const parsed = await gemini.generateJSON(buildSplitProblemsPrompt(rawText), { maxOutputTokens: 8192, temperature: 0.3 });
       problems = (Array.isArray(parsed.problems) ? parsed.problems : []).map(p => String(p || '').trim()).filter(Boolean);
     } catch (splitErr) {
       return res.status(500).json({ error: `Could not read the questions: ${splitErr.message}` });
